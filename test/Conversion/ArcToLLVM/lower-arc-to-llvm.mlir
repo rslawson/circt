@@ -374,6 +374,20 @@ func.func @PlusArgs() -> (i1, i1, i42) {
   return %0, %1, %2 : i1, i1, i42
 }
 
+// CHECK-LABEL: llvm.func @ReadMem
+// CHECK-SAME: (%[[MEM:.*]]: !llvm.array<4 x i8>)
+func.func @ReadMem(%mem: !hw.array<4xi8>) -> !hw.array<4xi8> {
+  // CHECK: %[[NAME:.*]] = llvm.mlir.addressof @{{.*}} : !llvm.ptr
+  // CHECK: %[[SLOT:.*]] = llvm.alloca %{{.*}} x !llvm.array<4 x i8> : (i32) -> !llvm.ptr
+  // CHECK: llvm.store %[[MEM]], %[[SLOT]] : !llvm.array<4 x i8>, !llvm.ptr
+  // CHECK: llvm.call @arcRuntimeIR_readMem(%[[NAME]], %[[SLOT]], {{.*}}) : (!llvm.ptr, !llvm.ptr, i64, i32, i32, i8, i8, i64, i64, i64) -> ()
+  // CHECK: %[[RESULT:.*]] = llvm.load %[[SLOT]] : !llvm.ptr -> !llvm.array<4 x i8>
+  // CHECK: llvm.return %[[RESULT]]
+  %name = sim.string.literal "mem.hex"
+  %0 = sim.sv.readmem %name, %mem {dimDescending = array<i1: false>, dimLows = array<i64: 0>} : !hw.array<4xi8>
+  return %0 : !hw.array<4xi8>
+}
+
 // CHECK-LABEL: llvm.func @IsTerminated
 // CHECK-SAME: (%[[STATE:.*]]: !llvm.ptr)
 func.func @IsTerminated(%state: !arc.storage) -> i1 {

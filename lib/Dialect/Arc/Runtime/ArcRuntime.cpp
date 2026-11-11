@@ -24,6 +24,7 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
 
 #ifdef ARC_RUNTIME_JIT_BIND
@@ -294,6 +295,94 @@ uint8_t arcRuntimeIR_valuePlusArgs(const char *format, uint64_t *value,
   return 1;
 }
 
+// --- Memory Loading ---
+
+void arcRuntimeIR_readMem(const char *fileName, uint8_t *memory,
+                          uint64_t numWords, uint32_t wordBits,
+                          uint32_t wordStride, uint8_t isBinary,
+                          uint8_t descending, int64_t lowAddress,
+                          int64_t startAddress, int64_t finishAddress) {
+  auto buffer = llvm::MemoryBuffer::getFile(fileName, /*IsText=*/true);
+  if (!buffer) {
+    std::cerr << "WARNING: $readmem" << (isBinary ? 'b' : 'h')
+              << ": cannot open file \"" << fileName << "\"" << std::endl;
+    return;
+  }
+
+  // Determine the range of addresses to load and the direction.
+  int64_t highAddress = lowAddress + static_cast<int64_t>(numWords) - 1;
+  int64_t address = startAddress >= 0 ? startAddress : lowAddress;
+  int64_t lastAddress = finishAddress >= 0 ? finishAddress : highAddress;
+  int64_t step = lastAddress < address ? -1 : 1;
+  unsigned radix = isBinary ? 2 : 16;
+  unsigned numBytes = (wordBits + 7) / 8;
+
+  llvm::StringRef text = (*buffer)->getBuffer();
+  while (!text.empty()) {
+    // Skip whitespace and comments.
+    text = text.ltrim();
+    if (text.consume_front("//")) {
+      text = text.drop_until([](char c) { return c == '\n'; });
+      continue;
+    }
+    if (text.consume_front("/*")) {
+      auto end = text.find("*/");
+      text = end == llvm::StringRef::npos ? llvm::StringRef()
+                                          : text.drop_front(end + 2);
+      continue;
+    }
+    if (text.empty())
+      break;
+
+    // Extract the next token.
+    auto token = text.take_until([](char c) { return std::isspace(c); });
+    text = text.drop_front(token.size());
+
+    // Handle address specifications, which are always hexadecimal.
+    if (token.consume_front("@")) {
+      uint64_t newAddress;
+      if (token.getAsInteger(16, newAddress)) {
+        std::cerr << "WARNING: $readmem: invalid address in file \"" << fileName
+                  << "\"" << std::endl;
+        return;
+      }
+      address = static_cast<int64_t>(newAddress);
+      continue;
+    }
+
+    // Parse the word. Unknown bits are loaded as zeros, and underscores are
+    // ignored.
+    std::string digits;
+    for (char c : token) {
+      if (c == '_')
+        continue;
+      if (c == 'x' || c == 'X' || c == 'z' || c == 'Z' || c == '?')
+        c = '0';
+      digits.push_back(c);
+    }
+    llvm::APInt word;
+    if (llvm::StringRef(digits).getAsInteger(radix, word)) {
+      std::cerr << "WARNING: $readmem: invalid word \"" << token.str()
+                << "\" in file \"" << fileName << "\"" << std::endl;
+      return;
+    }
+    word = word.zextOrTrunc(std::max(wordBits, 1u));
+
+    // Store the word if its address is within the memory and the range to be
+    // loaded.
+    if (address < lowAddress || address > highAddress)
+      return;
+    auto index = descending ? address - lowAddress : highAddress - address;
+    auto *ptr = memory + index * wordStride;
+    for (unsigned i = 0; i < numBytes; ++i)
+      ptr[i] = word.extractBitsAsZExtValue(
+          std::min(8u, word.getBitWidth() - i * 8), i * 8);
+    if (address == lastAddress)
+      return;
+    address += step;
+  }
+}
+
 void arcRuntimeIR_dumpFile(uint8_t *modelState, const char *fileName) {
   auto *statePtr = arcRuntimeGetStateFromModelState(modelState, 0);
   getModelInstance(statePtr)->setDumpFile(fileName);
@@ -314,7 +403,7 @@ static const APICallbacks apiCallbacksGlobal{
     &arcRuntimeIR_getStdoutStream, &arcRuntimeIR_getStderrStream,
     &arcRuntimeIR_swapTraceBuffer, &arcRuntimeIR_dumpFile,
     &arcRuntimeIR_dumpVars,        &arcRuntimeIR_testPlusArgs,
-    &arcRuntimeIR_valuePlusArgs};
+    &arcRuntimeIR_valuePlusArgs,   &arcRuntimeIR_readMem};
 
 const APICallbacks &getArcRuntimeAPICallbacks() { return apiCallbacksGlobal; }
 

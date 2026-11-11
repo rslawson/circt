@@ -1197,6 +1197,106 @@ struct PlusArgsValueOpLowering
   StringCache &stringCache;
 };
 
+// Lowers `sim.string.literal` to the address of a global string constant.
+// Dynamic strings are otherwise unsupported, but literals are commonly passed
+// to system tasks such as `$readmemh`.
+struct StringConstantOpLowering
+    : public OpConversionPattern<sim::StringConstantOp> {
+  StringConstantOpLowering(const TypeConverter &typeConverter,
+                           MLIRContext *context, StringCache &stringCache)
+      : OpConversionPattern(typeConverter, context), stringCache(stringCache) {}
+
+  LogicalResult
+  matchAndRewrite(sim::StringConstantOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOp(op, stringCache.getOrCreate(rewriter, op.getLiteral()));
+    return success();
+  }
+
+  StringCache &stringCache;
+};
+
+// Lowers `sim.sv.readmem` to a call of the runtime library, which updates a
+// copy of the memory on the stack.
+struct SVReadMemOpLowering : public OpConversionPattern<sim::SVReadMemOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(sim::SVReadMemOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto arrayType = dyn_cast<hw::ArrayType>(op.getMemory().getType());
+    if (!arrayType || !isa<IntegerType>(arrayType.getElementType()))
+      return rewriter.notifyMatchFailure(op, "only arrays of integers");
+    if (op.getDimLows().size() != 1 || op.getSliceLeft() || op.getEnumValues())
+      return rewriter.notifyMatchFailure(op, "unsupported memory");
+
+    auto *context = rewriter.getContext();
+    auto ptrType = LLVM::LLVMPointerType::get(context);
+    auto i8Type = rewriter.getI8Type();
+    auto i32Type = rewriter.getI32Type();
+    auto i64Type = rewriter.getI64Type();
+    auto func =
+        LLVM::lookupOrCreateFn(rewriter, op->getParentOfType<ModuleOp>(),
+                               runtime::APICallbacks::symNameReadMem,
+                               {ptrType, ptrType, i64Type, i32Type, i32Type,
+                                i8Type, i8Type, i64Type, i64Type, i64Type},
+                               LLVM::LLVMVoidType::get(context));
+    if (failed(func))
+      return failure();
+
+    // Spill the memory to the stack, and compute the distance between
+    // consecutive words.
+    auto llvmArrayType = typeConverter->convertType(arrayType);
+    auto one = LLVM::ConstantOp::create(rewriter, loc, i32Type,
+                                        rewriter.getI32IntegerAttr(1));
+    auto slot =
+        LLVM::AllocaOp::create(rewriter, loc, ptrType, llvmArrayType, one);
+    LLVM::StoreOp::create(rewriter, loc, adaptor.getMemory(), slot);
+    auto secondWord = LLVM::GEPOp::create(rewriter, loc, ptrType, llvmArrayType,
+                                          slot, ArrayRef<LLVM::GEPArg>{0, 1});
+    Value stride = LLVM::SubOp::create(
+        rewriter, loc,
+        LLVM::PtrToIntOp::create(rewriter, loc, i64Type, secondWord),
+        LLVM::PtrToIntOp::create(rewriter, loc, i64Type, slot));
+    stride = LLVM::TruncOp::create(rewriter, loc, i32Type, stride);
+
+    // Call the runtime library.
+    auto constI64 = [&](int64_t value) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                      rewriter.getI64IntegerAttr(value));
+    };
+    auto constI32 = [&](int32_t value) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, i32Type,
+                                      rewriter.getI32IntegerAttr(value));
+    };
+    auto constI8 = [&](int8_t value) -> Value {
+      return LLVM::ConstantOp::create(rewriter, loc, i8Type,
+                                      rewriter.getI8IntegerAttr(value));
+    };
+    auto address = [&](Value addr) -> Value {
+      if (!addr)
+        return constI64(-1);
+      return LLVM::SExtOp::create(rewriter, loc, i64Type, addr);
+    };
+    SmallVector<Value> args{
+        adaptor.getFilename(),
+        slot,
+        constI64(arrayType.getNumElements()),
+        constI32(arrayType.getElementType().getIntOrFloatBitWidth()),
+        stride,
+        constI8(op.getIsBinary()),
+        constI8(op.getDimDescending()[0]),
+        constI64(op.getDimLows()[0]),
+        address(adaptor.getStartAddr()),
+        address(adaptor.getFinishAddr())};
+    LLVM::CallOp::create(rewriter, loc, *func, args);
+
+    rewriter.replaceOpWithNewOp<LLVM::LoadOp>(op, llvmArrayType, slot);
+    return success();
+  }
+};
+
 // Lowers `arc.dump_vars` to a call of the runtime library.
 struct DumpVarsOpLowering : public OpConversionPattern<arc::DumpVarsOp> {
   using OpConversionPattern::OpConversionPattern;
@@ -1991,6 +2091,11 @@ void LowerArcToLLVMPass::runOnOperation() {
   converter.addConversion([&](StorageType type) {
     return LLVM::LLVMPointerType::get(type.getContext());
   });
+  // Dynamic strings are only supported as literals, represented as a pointer
+  // to a null-terminated string.
+  converter.addConversion([&](sim::DynamicStringType type) {
+    return LLVM::LLVMPointerType::get(type.getContext());
+  });
   converter.addConversion([&](ContextType type) {
     return LLVM::LLVMPointerType::get(type.getContext());
   });
@@ -2068,6 +2173,7 @@ void LowerArcToLLVMPass::runOnOperation() {
     ConstantTimeOpLowering,
     CurrentTimeOpLowering,
     DumpVarsOpLowering,
+    SVReadMemOpLowering,
     GetNextWakeupOpLowering,
     IsTerminatedOpLowering,
     IntToTimeOpLowering,
@@ -2100,10 +2206,10 @@ void LowerArcToLLVMPass::runOnOperation() {
   patterns.add<ExecuteOp>(convert);
 
   StringCache stringCache;
-  patterns
-      .add<DumpFileOpLowering, PlusArgsTestOpLowering, PlusArgsValueOpLowering,
-           SimEmitValueOpLowering, SimPrintFormattedProcOpLowering>(
-          converter, &getContext(), stringCache);
+  patterns.add<DumpFileOpLowering, PlusArgsTestOpLowering,
+               PlusArgsValueOpLowering, SimEmitValueOpLowering,
+               SimPrintFormattedProcOpLowering, StringConstantOpLowering>(
+      converter, &getContext(), stringCache);
   patterns.add<SimStreamOpLowering<sim::StdoutStreamOp>>(
       converter, &getContext(), runtime::APICallbacks::symNameGetStdoutStream);
   patterns.add<SimStreamOpLowering<sim::StderrStreamOp>>(

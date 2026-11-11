@@ -15,6 +15,7 @@
 #include "circt/Dialect/Comb/CombOps.h"
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/HW/HWTypes.h"
+#include "circt/Dialect/Sim/SimOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/Transforms/StructuralTypeConversions.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -435,6 +436,8 @@ void LowerArraysPass::runOnOperation() {
   });
 
   target.addLegalOp<ArrayRefFromArrayOp, ArrayRefToArrayOp>();
+  // Memories loaded from files are lowered from their array value.
+  target.addLegalOp<sim::SVReadMemOp>();
   // Arrays within structs or unions always use !hw.array.
   target.addLegalOp<StructCreateOp, StructInjectOp, StructExtractOp,
                     StructExplodeOp, UnionCreateOp, UnionExtractOp>();
