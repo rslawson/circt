@@ -83,9 +83,15 @@ LogicalResult LowerDPIFuncPass::lowerDPIFuncOp(sim::DPIFuncOp simFunc,
   for (auto &arg : dpiArgs) {
     // TODO: Support additional non-integer types beyond the pointer-shaped
     // open-array ABI path.
-    if (!arg.type.isInteger() && !(isa<LLVM::LLVMPointerType>(arg.type) &&
-                                   (arg.dir == sim::DPIDirection::Input ||
-                                    arg.dir == sim::DPIDirection::Ref)))
+    // Dynamic strings are passed as `const char *` and may be used as inputs
+    // and return values.
+    bool isInputOrReturn = arg.dir == sim::DPIDirection::Input ||
+                           arg.dir == sim::DPIDirection::Return;
+    if (!arg.type.isInteger() &&
+        !(isa<LLVM::LLVMPointerType>(arg.type) &&
+          (arg.dir == sim::DPIDirection::Input ||
+           arg.dir == sim::DPIDirection::Ref)) &&
+        !(isa<sim::DynamicStringType>(arg.type) && isInputOrReturn))
       return simFunc->emitError()
              << "non-integer type argument is unsupported now";
 
@@ -188,6 +194,13 @@ LogicalResult LowerDPIFuncPass::lowerDPIFuncOp(sim::DPIFuncOp simFunc,
   auto call = func::CallOp::create(builder, func, functionInputs);
   if (explicitReturnType)
     explicitReturnValue = call.getResult(0);
+
+  // Copy returned strings, since the DPI function may reuse the memory
+  // pointed to once it is called again.
+  if (explicitReturnValue &&
+      isa<sim::DynamicStringType>(explicitReturnValue.getType()))
+    explicitReturnValue = sim::FormatToStringOp::create(
+        builder, sim::FormatStringOp::create(builder, explicitReturnValue));
 
   SmallVector<Value> results;
   results.reserve(wrapperOutputAllocas.size() + (explicitReturnValue ? 1 : 0));

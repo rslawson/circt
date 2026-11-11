@@ -74,3 +74,13 @@ hw.module @already_lowered_call(in %clock : !seq.clock, in %in: i32, out o: i32)
   %0 = sim.func.dpi.call @already_lowered(%in) clock %clock : (i32) -> i32
   hw.output %0 : i32
 }
+
+// Strings are passed as is, and returned strings are copied.
+// CHECK-LABEL: func.func private @str_c(!sim.dstring) -> !sim.dstring
+// CHECK-LABEL: func.func @str_wrapper(%arg0: !sim.dstring) -> !sim.dstring {
+// CHECK-NEXT:    %0 = call @str_c(%arg0) : (!sim.dstring) -> !sim.dstring
+// CHECK-NEXT:    %1 = sim.fmt.string %0 : !sim.dstring
+// CHECK-NEXT:    %2 = sim.string.format_to_string %1
+// CHECK-NEXT:    return %2 : !sim.dstring
+// CHECK-NEXT:  }
+sim.func.dpi @str(in %arg0: !sim.dstring, return ret: !sim.dstring) attributes {verilogName="str_c"}
