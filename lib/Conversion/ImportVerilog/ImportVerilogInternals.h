@@ -584,6 +584,12 @@ struct Context {
   using VirtualInterfaceMemberScope = VirtualInterfaceMembers::ScopeTy;
   VirtualInterfaceMembers virtualIfaceMembers;
 
+  /// The variables selecting the active procedural continuous assignment or
+  /// force of each variable, if any. Each such statement is identified by a
+  /// non-zero value of the selector.
+  DenseMap<const slang::ast::Symbol *, std::pair<Value, unsigned>>
+      proceduralAssignSelectors;
+
   /// A table of defined global variables that may be referred to by name in
   /// expressions.
   DenseMap<const slang::ast::ValueSymbol *, moore::GlobalVariableOp>

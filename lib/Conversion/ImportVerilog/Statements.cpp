@@ -1811,6 +1811,142 @@ struct StmtVisitor {
     return success();
   }
 
+  /// Set the insertion point to the end of a module's body, which may not have
+  /// its terminator yet.
+  void setInsertionPointToModuleEnd(moore::SVModuleOp moduleOp) {
+    auto *body = moduleOp.getBody();
+    if (!body->empty() && body->back().hasTrait<OpTrait::IsTerminator>())
+      builder.setInsertionPoint(&body->back());
+    else
+      builder.setInsertionPointToEnd(body);
+  }
+
+  /// Get the variable selecting the active procedural continuous assignment
+  /// or force of `target`, creating it in the enclosing module if necessary.
+  FailureOr<Value> getProceduralAssignSelector(const slang::ast::Symbol &target,
+                                               moore::SVModuleOp moduleOp) {
+    auto &[selector, numStatements] =
+        context.proceduralAssignSelectors[&target];
+    if (selector) {
+      if (selector.getParentBlock() != moduleOp.getBody())
+        return mlir::emitError(loc)
+               << "procedural assignments to `" << target.name
+               << "` from multiple modules are not supported";
+      return selector;
+    }
+    OpBuilder::InsertionGuard guard(builder);
+    setInsertionPointToModuleEnd(moduleOp);
+    auto intType = moore::IntType::getInt(context.getContext(), 32);
+    auto zero = moore::ConstantOp::create(builder, loc, intType, 0);
+    selector = moore::VariableOp::create(
+        builder, loc, moore::RefType::get(intType),
+        builder.getStringAttr(Twine(target.name) + "_procedural_assign"), zero);
+    return selector;
+  }
+
+  /// Handle procedural continuous assignments and forces, such as
+  /// `assign x = y;` and `force x = y;` in a procedure. From then on, the
+  /// target follows the value of the right-hand side, overriding other
+  /// assignments to it, until it is deassigned or released, or another such
+  /// statement targets it.
+  ///
+  /// Each statement gets a module-level `always_comb` procedure that applies
+  /// the assignment while the statement is selected as the active one for its
+  /// target and the target differs from the assigned value. Since the
+  /// procedure reads the target, it also reapplies the assignment whenever the
+  /// target is assigned by another statement.
+  LogicalResult visit(const slang::ast::ProceduralAssignStatement &stmt) {
+    const auto *assign =
+        stmt.assignment.as_if<slang::ast::AssignmentExpression>();
+    if (!assign || assign->isNonBlocking())
+      return mlir::emitError(loc) << "unsupported procedural assignment";
+    const auto *target = assign->left().getSymbolReference();
+    if (!target)
+      return mlir::emitError(loc)
+             << "unsupported target of procedural assignment";
+    if (target->kind == slang::ast::SymbolKind::Net)
+      return mlir::emitError(loc) << "unsupported: forcing nets";
+    auto moduleOp = builder.getInsertionBlock()
+                        ->getParentOp()
+                        ->getParentOfType<moore::SVModuleOp>();
+    if (!moduleOp)
+      return mlir::emitError(loc)
+             << "unsupported: procedural assignment in subroutine";
+
+    auto selector = getProceduralAssignSelector(*target, moduleOp);
+    if (failed(selector))
+      return failure();
+    auto id = ++context.proceduralAssignSelectors[target].second;
+    auto intType = moore::IntType::getInt(context.getContext(), 32);
+
+    // Create the procedure applying the assignment while it is selected.
+    {
+      OpBuilder::InsertionGuard guard(builder);
+      auto previousCallback = context.rvalueReadCallback;
+      llvm::scope_exit done(
+          [&] { context.rvalueReadCallback = previousCallback; });
+      context.rvalueReadCallback = nullptr;
+      setInsertionPointToModuleEnd(moduleOp);
+      auto procOp = moore::ProcedureOp::create(
+          builder, loc, moore::ProcedureKind::AlwaysComb);
+      auto &entryBlock = procOp.getBody().emplaceBlock();
+      builder.setInsertionPointToEnd(&entryBlock);
+      auto active = moore::ReadOp::create(builder, loc, *selector);
+      auto idValue = moore::ConstantOp::create(builder, loc, intType, id);
+      Value isSelected = moore::EqOp::create(builder, loc, active, idValue);
+      auto current = context.convertRvalueExpression(assign->left());
+      auto value = context.convertRvalueExpression(assign->right());
+      if (!current || !value)
+        return failure();
+      Value differs = moore::CaseNeOp::create(builder, loc, current, value);
+      isSelected = moore::AndOp::create(builder, loc, isSelected, differs);
+      isSelected = moore::ToBuiltinIntOp::create(builder, loc, isSelected);
+      auto &exitBlock = createBlock();
+      auto &applyBlock = createBlock();
+      cf::CondBranchOp::create(builder, loc, isSelected, &applyBlock,
+                               &exitBlock);
+      builder.setInsertionPointToEnd(&applyBlock);
+      if (!context.convertRvalueExpression(stmt.assignment))
+        return failure();
+      cf::BranchOp::create(builder, loc, &exitBlock);
+      builder.setInsertionPointToEnd(&exitBlock);
+      moore::ReturnOp::create(builder, loc);
+    }
+
+    // Select the statement and apply the assignment immediately.
+    moore::BlockingAssignOp::create(
+        builder, loc, *selector,
+        moore::ConstantOp::create(builder, loc, intType, id));
+    if (!context.convertRvalueExpression(stmt.assignment))
+      return failure();
+    return success();
+  }
+
+  /// Handle `deassign` and `release` statements. The target keeps its current
+  /// value until it is assigned again.
+  LogicalResult visit(const slang::ast::ProceduralDeassignStatement &stmt) {
+    const auto *target = stmt.lvalue.getSymbolReference();
+    if (!target)
+      return mlir::emitError(loc)
+             << "unsupported target of procedural deassignment";
+    if (target->kind == slang::ast::SymbolKind::Net)
+      return mlir::emitError(loc) << "unsupported: releasing nets";
+    auto moduleOp = builder.getInsertionBlock()
+                        ->getParentOp()
+                        ->getParentOfType<moore::SVModuleOp>();
+    if (!moduleOp)
+      return mlir::emitError(loc)
+             << "unsupported: procedural deassignment in subroutine";
+    auto selector = getProceduralAssignSelector(*target, moduleOp);
+    if (failed(selector))
+      return failure();
+    auto intType = moore::IntType::getInt(context.getContext(), 32);
+    moore::BlockingAssignOp::create(
+        builder, loc, *selector,
+        moore::ConstantOp::create(builder, loc, intType, 0));
+    return success();
+  }
+
   /// Emit an error for all other statements.
   template <typename T>
   LogicalResult visit(T &&stmt) {

@@ -57,7 +57,7 @@ endmodule
 module Foo;
   int a;
   // expected-error @below {{unsupported statement}}
-  initial release a;
+  initial randcase 1: a = 1; endcase
 endmodule
 
 // -----
@@ -491,4 +491,11 @@ module Foo;
   bit [1:0] z;
   // expected-error @below {{ref argument `p` expects '!moore.ref<struct<{x: i1, y: i1}>>' but call provides '!moore.ref<i2>'}}
   initial useRef(z);
+endmodule
+
+// -----
+module Foo;
+  wire a;
+  // expected-error @below {{unsupported: forcing nets}}
+  initial force a = 1;
 endmodule
