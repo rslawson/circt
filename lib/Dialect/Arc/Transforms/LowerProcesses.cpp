@@ -53,6 +53,7 @@
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/LLHD/LLHDOps.h"
 #include "circt/Dialect/Sim/SimOps.h"
+#include "circt/Dialect/Verif/VerifOps.h"
 #include "mlir/Analysis/Liveness.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
@@ -422,6 +423,42 @@ void ProcessLowering::createCoroutine() {
   inferredContext = InferredContextOp::create(builder, coroOp.getLoc());
 }
 
+/// Lower an immediate `verif.assert` or `verif.assume` op with an `i1`
+/// property into a print of an error message if the property does not hold.
+static void lowerImmediateAssertion(OpBuilder &builder, Operation *op) {
+  auto loc = op->getLoc();
+  Value property = op->getOperand(0);
+  Value enable = op->getNumOperands() > 1 ? op->getOperand(1) : Value{};
+  auto label = op->getAttrOfType<StringAttr>("label");
+
+  // Compute whether the assertion failed.
+  auto trueValue = hw::ConstantOp::create(builder, loc, builder.getI1Type(), 1);
+  Value failed = comb::XorOp::create(builder, loc, property, trueValue);
+  if (enable)
+    failed = comb::AndOp::create(builder, loc, failed, enable);
+
+  // Assemble the error message.
+  std::string message = "Error: Assertion failed";
+  if (label && !label.getValue().empty())
+    message += " (" + label.getValue().str() + ")";
+  if (auto fileLoc = dyn_cast<FileLineColLoc>(loc))
+    message += " at " + fileLoc.getFilename().getValue().str() + ":" +
+               std::to_string(fileLoc.getLine());
+  message += "\n";
+
+  // Print the message if the assertion failed.
+  auto *block = op->getBlock();
+  auto *contBlock = block->splitBlock(op->getIterator());
+  auto *failBlock = new Block();
+  block->getParent()->getBlocks().insert(contBlock->getIterator(), failBlock);
+  builder.setInsertionPointToEnd(block);
+  cf::CondBranchOp::create(builder, loc, failed, failBlock, contBlock);
+  builder.setInsertionPointToEnd(failBlock);
+  auto literal = sim::FormatLiteralOp::create(builder, loc, message);
+  sim::PrintFormattedProcOp::create(builder, loc, literal);
+  cf::BranchOp::create(builder, loc, contBlock);
+}
+
 /// Lower ops in the coroutine body that interact with the simulation and need
 /// access to the model context.
 void ProcessLowering::lowerSimulationOps() {
@@ -429,6 +466,9 @@ void ProcessLowering::lowerSimulationOps() {
   coroOp.walk([&](Operation *op) {
     if (isa<sim::TerminateOp, sim::PauseOp, sim::DumpFileOp, sim::DumpVarsOp,
             llhd::CurrentTimeOp>(op))
+      ops.push_back(op);
+    else if (isa<verif::AssertOp, verif::AssumeOp>(op) &&
+             op->getOperand(0).getType().isInteger(1))
       ops.push_back(op);
   });
   for (auto *op : ops) {
@@ -445,6 +485,11 @@ void ProcessLowering::lowerSimulationOps() {
                          dumpFileOp.getFilenameAttr());
     } else if (isa<sim::DumpVarsOp>(op)) {
       DumpVarsOp::create(builder, loc, inferredContext);
+    } else if (isa<verif::AssertOp, verif::AssumeOp>(op)) {
+      // An immediate assertion that fails reports an error, like `$error`, and
+      // the simulation continues. See IEEE 1800-2017 § 16.3 "Immediate
+      // assertions".
+      lowerImmediateAssertion(builder, op);
     } else if (auto timeOp = dyn_cast<llhd::CurrentTimeOp>(op)) {
       auto now = CurrentTimeOp::create(builder, loc, inferredContext);
       auto time = llhd::IntToTimeOp::create(builder, loc, now);

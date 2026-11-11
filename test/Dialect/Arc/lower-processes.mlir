@@ -776,3 +776,25 @@ hw.module @DumpVars() {
   }
   hw.output
 }
+
+//===----------------------------------------------------------------------===//
+// Immediate assertions print an error message if they fail.
+
+// CHECK-LABEL: arc.coroutine.define @ImmediateAssert.llhd.process
+// CHECK:   [[TRUE:%.+]] = hw.constant true
+// CHECK:   [[NOT:%.+]] = comb.xor %arg0, [[TRUE]] : i1
+// CHECK:   [[FAILED:%.+]] = comb.and [[NOT]], %arg1 : i1
+// CHECK:   cf.cond_br [[FAILED]], ^[[FAIL:.+]], ^[[CONT:.+]]
+// CHECK: ^[[FAIL]]:
+// CHECK:   [[MSG:%.+]] = sim.fmt.literal "Error: Assertion failed (myAssert)
+// CHECK:   sim.proc.print [[MSG]]
+// CHECK:   cf.br ^[[CONT]]
+// CHECK: ^[[CONT]]:
+// CHECK-NOT: verif.assert
+hw.module @ImmediateAssert(in %a: i1, in %en: i1) {
+  llhd.process {
+    verif.assert %a if %en label "myAssert" : i1
+    llhd.halt
+  }
+  hw.output
+}
