@@ -162,3 +162,15 @@ arc.model @UnionNested io !hw.modty<> {
 arc.model @HeaderOnly io !hw.modty<> {
   ^bb0(%arg0: !arc.storage):
 }
+
+// States of aggregate and float types are not traced, since the trace encoders
+// read the initial value of a state from its storage as an integer.
+// CHECK-LABEL: arc.model @NoAggregateTaps
+// NOTAPS-NOT:  traceTaps
+// TAPS-SAME:   traceTaps [#arc.trace_tap<i8, {{[0-9]+}}, ["int"]>]
+arc.model @NoAggregateTaps io !hw.modty<> {
+^bb0(%arg0: !arc.storage):
+  %0 = arc.alloc_state %arg0 {name = "int"} : (!arc.storage) -> !arc.state<i8>
+  %1 = arc.alloc_state %arg0 {name = "struct"} : (!arc.storage) -> !arc.state<!hw.struct<a: i8>>
+  %2 = arc.alloc_state %arg0 {name = "float"} : (!arc.storage) -> !arc.state<f64>
+}

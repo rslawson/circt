@@ -72,6 +72,11 @@ void AllocateStatePass::tapNamedState(AllocStateOp allocOp,
                                       IntegerAttr offset) {
   TraceTapAttr tapAttr;
   auto valueType = cast<StateType>(allocOp.getType()).getType();
+  // The trace encoders read the initial value of a state from its storage as
+  // an integer. This does not work for aggregates and floats, whose storage
+  // layout differs from their bit representation. Do not trace these.
+  if (!isa<IntegerType>(valueType))
+    return;
   auto typeAttr = TypeAttr::get(valueType);
   // Check for "name" or "names" attribute
   if (auto namesAttr = allocOp->getAttrOfType<ArrayAttr>("names")) {
