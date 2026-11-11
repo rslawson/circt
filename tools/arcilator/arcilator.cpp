@@ -744,6 +744,12 @@ static LogicalResult processBuffer(
     if (jitArgs.empty())
       (*simulationFunc)(nullptr);
 
+    // Report a failure if the simulation terminated with failure, for example
+    // through `$fatal`.
+    if (!noJitRuntime && arcRuntimeSimulationFailed()) {
+      llvm::outs().flush();
+      return failure();
+    }
     return success();
   }
 #endif // ARCILATOR_ENABLE_JIT
