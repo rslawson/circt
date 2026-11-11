@@ -15,6 +15,7 @@
 #include "circt/Dialect/Arc/ArcOps.h"
 #include "circt/Dialect/Arc/ArcPasses.h"
 #include "circt/Dialect/Arc/ArcTypes.h"
+#include "circt/Dialect/Sim/SimOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -39,6 +40,7 @@ using namespace arc;
 namespace {
 struct GenerateDriverPass
     : public arc::impl::GenerateDriverBase<GenerateDriverPass> {
+  using GenerateDriverBase::GenerateDriverBase;
   void runOnOperation() override;
   void generateDriver(ModelOp modelOp, SymbolTable &symbolTable);
 };
@@ -83,15 +85,20 @@ void GenerateDriverPass::generateDriver(ModelOp modelOp,
   auto never = arith::ConstantOp::create(builder, loc,
                                          builder.getIntegerAttr(i64Type, -1));
   auto firstWakeup = GetNextWakeupOp::create(builder, loc, arcContext);
+  auto zero = arith::ConstantOp::create(builder, loc,
+                                        builder.getIntegerAttr(i64Type, 0));
 
-  auto whileOp =
-      scf::WhileOp::create(builder, loc, i64Type, ValueRange{firstWakeup});
+  // The loop carries the next wakeup time and the number of consecutive
+  // evaluations at the current time.
+  auto whileOp = scf::WhileOp::create(builder, loc, {i64Type, i64Type},
+                                      ValueRange{firstWakeup, zero});
 
   // The "before" region tests whether a wakeup is still pending and the
   // simulation has not requested termination, and forwards the wakeup time
   // into the loop body.
   auto *beforeBlock = builder.createBlock(&whileOp.getBefore());
   auto wakeup = beforeBlock->addArgument(i64Type, loc);
+  auto deltaCount = beforeBlock->addArgument(i64Type, loc);
   auto pending = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::ne,
                                        wakeup, never);
   auto terminated = IsTerminatedOp::create(builder, loc, arcContext);
@@ -99,14 +106,53 @@ void GenerateDriverPass::generateDriver(ModelOp modelOp,
       builder, loc, arith::CmpIPredicate::eq, terminated,
       arith::ConstantOp::create(builder, loc, builder.getBoolAttr(false)));
   auto proceed = arith::AndIOp::create(builder, loc, pending, running);
-  scf::ConditionOp::create(builder, loc, proceed, ValueRange{wakeup});
+  scf::ConditionOp::create(builder, loc, proceed,
+                           ValueRange{wakeup, deltaCount});
 
   // The "after" region advances time to the scheduled wakeup, evaluates the
   // model, and reads the next wakeup time to feed back into the condition.
   auto *afterBlock = builder.createBlock(&whileOp.getAfter());
   auto resumeTime = afterBlock->addArgument(i64Type, loc);
+  auto prevDeltaCount = afterBlock->addArgument(i64Type, loc);
+
+  // Count the consecutive evaluations at the same time, and abort the
+  // simulation if the count exceeds the limit.
+  auto currentTime = CurrentTimeOp::create(builder, loc, arcContext);
+  auto sameTime = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::eq,
+                                        resumeTime, currentTime);
+  auto one = arith::ConstantOp::create(builder, loc,
+                                       builder.getIntegerAttr(i64Type, 1));
+  auto incremented = arith::AddIOp::create(builder, loc, prevDeltaCount, one);
+  Value newDeltaCount =
+      arith::SelectOp::create(builder, loc, sameTime, incremented, zero);
+  OpBuilder::InsertionGuard guard(builder);
+  if (deltaLimit != 0) {
+    auto limit = arith::ConstantOp::create(
+        builder, loc, builder.getIntegerAttr(i64Type, deltaLimit));
+    auto exceeded = arith::CmpIOp::create(
+        builder, loc, arith::CmpIPredicate::uge, newDeltaCount, limit);
+    auto ifOp = scf::IfOp::create(builder, loc, exceeded, true);
+    builder.setInsertionPoint(ifOp.thenYield());
+    auto prefix = sim::FormatLiteralOp::create(
+        builder, loc,
+        "Error: simulation does not settle after " +
+            std::to_string(deltaLimit) + " evaluations at time ");
+    auto time = sim::FormatDecOp::create(builder, loc, resumeTime);
+    time.setSpecifierWidthAttr(builder.getI32IntegerAttr(0));
+    auto suffix = sim::FormatLiteralOp::create(
+        builder, loc, " fs; possible combinational loop\n");
+    auto message = sim::FormatStringConcatOp::create(
+        builder, loc, ValueRange{prefix, time, suffix});
+    auto stream = sim::StderrStreamOp::create(builder, loc);
+    sim::PrintFormattedProcOp::create(builder, loc, message, stream);
+    TerminateOp::create(builder, loc, arcContext, false);
+
+    // Otherwise evaluate the model.
+    builder.setInsertionPoint(ifOp.elseYield());
+  }
   SimSetTimeOp::create(builder, loc, instance, resumeTime);
   SimStepOp::create(builder, loc, instance);
+  builder.setInsertionPointToEnd(afterBlock);
   auto nextWakeup = GetNextWakeupOp::create(builder, loc, arcContext);
-  scf::YieldOp::create(builder, loc, ValueRange{nextWakeup});
+  scf::YieldOp::create(builder, loc, ValueRange{nextWakeup, newDeltaCount});
 }

@@ -244,12 +244,23 @@ def GenerateDriver : Pass<"arc-generate-driver", "mlir::ModuleOp"> {
     evaluates the model until no further wakeup is pending or the model has
     requested termination through `arc.terminate`. This lets a model be run
     directly through the arcilator JIT without a hand-written driver loop.
+  
+    If the model keeps requesting evaluations at the same time, for example
+    due to a combinational loop through signals that does not settle, the
+    driver aborts the simulation with an error after `delta-limit`
+    consecutive evaluations.
   }];
+  let options = [
+    Option<"deltaLimit", "delta-limit", "uint64_t", "100000",
+      "Maximum number of consecutive evaluations of the model without time "
+      "advancing, before the simulation is aborted (0 for no limit)">,
+  ];
   let dependentDialects = [
     "arc::ArcDialect",
     "mlir::arith::ArithDialect",
     "mlir::func::FuncDialect",
     "mlir::scf::SCFDialect",
+    "sim::SimDialect",
   ];
 }
 
