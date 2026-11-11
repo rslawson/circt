@@ -151,6 +151,96 @@ struct StateReadOpLowering : public OpConversionPattern<arc::StateReadOp> {
   }
 };
 
+/// Compute the address of an element of an array state, and whether the index
+/// is within the bounds of the array.
+static std::pair<Value, Value> prepareStateElementAccess(
+    Location loc, Value state, Value index, StateType stateType,
+    const TypeConverter *typeConverter, ConversionPatternRewriter &rewriter) {
+  uint64_t numElements;
+  Type elementType;
+  if (auto hwType = dyn_cast<hw::ArrayType>(stateType.getType())) {
+    numElements = hwType.getNumElements();
+    elementType = hwType.getElementType();
+  } else {
+    auto refType = cast<ArrayRefType>(stateType.getType());
+    numElements = refType.getNumElements();
+    elementType = refType.getElementType();
+  }
+  auto arrayType = LLVM::LLVMArrayType::get(
+      typeConverter->convertType(elementType), numElements);
+  auto indexType = cast<IntegerType>(index.getType());
+  auto i64Type = rewriter.getI64Type();
+  if (indexType.getWidth() < 64)
+    index = LLVM::ZExtOp::create(rewriter, loc, i64Type, index);
+  else if (indexType.getWidth() > 64)
+    index = LLVM::TruncOp::create(rewriter, loc, i64Type, index);
+  Value withinBounds;
+  if (indexType.getWidth() >= 64 ||
+      (uint64_t(1) << indexType.getWidth()) > numElements) {
+    auto bound = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type, rewriter.getI64IntegerAttr(numElements));
+    withinBounds = LLVM::ICmpOp::create(rewriter, loc, LLVM::ICmpPredicate::ult,
+                                        index, bound);
+  }
+  auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+  Value ptr = LLVM::GEPOp::create(rewriter, loc, ptrType, arrayType, state,
+                                  ArrayRef<LLVM::GEPArg>{0, index});
+  return {ptr, withinBounds};
+}
+
+struct StateReadElementOpLowering
+    : public OpConversionPattern<arc::StateReadElementOp> {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(arc::StateReadElementOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const final {
+    auto type = typeConverter->convertType(op.getType());
+    auto [ptr, withinBounds] = prepareStateElementAccess(
+        op.getLoc(), adaptor.getState(), adaptor.getIndex(),
+        op.getState().getType(), typeConverter, rewriter);
+    if (!withinBounds) {
+      rewriter.replaceOpWithNewOp<LLVM::LoadOp>(op, type, ptr);
+      return success();
+    }
+    // Only read the element if the index is within bounds, otherwise produce
+    // a zero value.
+    rewriter.replaceOpWithNewOp<scf::IfOp>(
+        op, withinBounds,
+        [&](auto &builder, auto loc) {
+          Value loadOp = LLVM::LoadOp::create(builder, loc, type, ptr);
+          scf::YieldOp::create(builder, loc, loadOp);
+        },
+        [&](auto &builder, auto loc) {
+          Value zeroValue = LLVM::ZeroOp::create(builder, loc, type);
+          scf::YieldOp::create(builder, loc, zeroValue);
+        });
+    return success();
+  }
+};
+
+struct StateWriteElementOpLowering
+    : public OpConversionPattern<arc::StateWriteElementOp> {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(arc::StateWriteElementOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const final {
+    auto [ptr, withinBounds] = prepareStateElementAccess(
+        op.getLoc(), adaptor.getState(), adaptor.getIndex(),
+        op.getState().getType(), typeConverter, rewriter);
+    if (!withinBounds) {
+      rewriter.replaceOpWithNewOp<LLVM::StoreOp>(op, adaptor.getValue(), ptr);
+      return success();
+    }
+    // Only write the element if the index is within bounds.
+    rewriter.replaceOpWithNewOp<scf::IfOp>(
+        op, withinBounds, [&](auto &builder, auto loc) {
+          LLVM::StoreOp::create(builder, loc, adaptor.getValue(), ptr);
+          scf::YieldOp::create(builder, loc);
+        });
+    return success();
+  }
+};
+
 struct StateWriteOpLowering : public OpConversionPattern<arc::StateWriteOp> {
   using OpConversionPattern::OpConversionPattern;
   LogicalResult
@@ -2545,6 +2635,8 @@ void LowerArcToLLVMPass::runOnOperation() {
     SimSetTimeOpLowering,
     StateReadOpLowering,
     StateWriteOpLowering,
+    StateReadElementOpLowering,
+    StateWriteElementOpLowering,
     StorageGetOpLowering,
     TerminateOpLowering,
     TimeToIntOpLowering,

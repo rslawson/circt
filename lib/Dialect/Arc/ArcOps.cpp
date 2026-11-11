@@ -907,5 +907,39 @@ LogicalResult ArrayRefAllocOp::verify() {
 
 #include "circt/Dialect/Arc/ArcInterfaces.cpp.inc"
 
+//===----------------------------------------------------------------------===//
+// StateReadElementOp and StateWriteElementOp
+//===----------------------------------------------------------------------===//
+
+/// Get the element type of a state holding an array, before or after arrays
+/// have been converted to array references.
+static Type getStateElementType(StateType type) {
+  if (auto arrayType = dyn_cast<hw::ArrayType>(type.getType()))
+    return arrayType.getElementType();
+  if (auto arrayRefType = dyn_cast<ArrayRefType>(type.getType()))
+    return arrayRefType.getElementType();
+  return {};
+}
+
+LogicalResult StateReadElementOp::verify() {
+  auto elementType = getStateElementType(getState().getType());
+  if (!elementType)
+    return emitOpError() << "requires a state holding an array";
+  if (getValue().getType() != elementType)
+    return emitOpError() << "result type " << getValue().getType()
+                         << " does not match element type " << elementType;
+  return success();
+}
+
+LogicalResult StateWriteElementOp::verify() {
+  auto elementType = getStateElementType(getState().getType());
+  if (!elementType)
+    return emitOpError() << "requires a state holding an array";
+  if (getValue().getType() != elementType)
+    return emitOpError() << "value type " << getValue().getType()
+                         << " does not match element type " << elementType;
+  return success();
+}
+
 #define GET_OP_CLASSES
 #include "circt/Dialect/Arc/Arc.cpp.inc"

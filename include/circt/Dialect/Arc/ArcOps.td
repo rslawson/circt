@@ -579,6 +579,41 @@ def StateWriteOp : ArcOp<"state_write", [
   ];
 }
 
+def StateReadElementOp : ArcOp<"state_read_element", [
+  MemoryEffects<[MemRead]>,
+]> {
+  let summary = "Read an element of an array state";
+  let description = [{
+    Reads the element at `index` of a state holding an array, without reading
+    the entire array. Reading an element beyond the end of the array produces
+    a zero value.
+  }];
+  let arguments = (ins StateType:$state, AnyInteger:$index);
+  let results = (outs AnyType:$value);
+  let assemblyFormat = [{
+    $state `[` $index `]` attr-dict `:` type($state) `,` type($index) `->`
+    type($value)
+  }];
+  let hasVerifier = 1;
+}
+
+def StateWriteElementOp : ArcOp<"state_write_element", [
+  MemoryEffects<[MemWrite]>,
+]> {
+  let summary = "Update an element of an array state";
+  let description = [{
+    Writes `value` to the element at `index` of a state holding an array,
+    without writing the entire array. Writes to elements beyond the end of the
+    array have no effect.
+  }];
+  let arguments = (ins StateType:$state, AnyInteger:$index, AnyType:$value);
+  let assemblyFormat = [{
+    $state `[` $index `]` `=` $value attr-dict `:` type($state) `,`
+    type($index) `,` type($value)
+  }];
+  let hasVerifier = 1;
+}
+
 def CurrentTimeOp : ArcOp<"current_time", [
   MemoryEffects<[MemRead]>
 ]> {

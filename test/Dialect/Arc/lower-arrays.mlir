@@ -206,3 +206,13 @@ func.func @DontMergeBlocks(%arg0: i1) {
 ^bb3:
   return
 }
+
+// CHECK-LABEL: func.func @StateElements
+// CHECK-SAME: (%arg0: !arc.state<!arc.arrayref<5xi8>>, %arg1: i3, %arg2: i8)
+func.func @StateElements(%arg0: !arc.state<!hw.array<5xi8>>, %arg1: i3, %arg2: i8) -> i8 {
+  // CHECK: arc.state_read_element %arg0[%arg1] : <!arc.arrayref<5xi8>>, i3 -> i8
+  %0 = arc.state_read_element %arg0[%arg1] : <!hw.array<5xi8>>, i3 -> i8
+  // CHECK: arc.state_write_element %arg0[%arg1] = %arg2 : <!arc.arrayref<5xi8>>, i3, i8
+  arc.state_write_element %arg0[%arg1] = %arg2 : <!hw.array<5xi8>>, i3, i8
+  return %0 : i8
+}
