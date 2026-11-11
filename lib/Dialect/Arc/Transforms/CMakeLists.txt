@@ -51,6 +51,7 @@ add_circt_dialect_library(CIRCTArcTransforms
   CIRCTSV
   CIRCTVerif
   MLIRControlFlowDialect
+  MLIRControlFlowTransforms
   MLIRFuncDialect
   MLIRIR
   MLIRLLVMDialect

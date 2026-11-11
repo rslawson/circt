@@ -16,6 +16,7 @@
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/HW/HWTypes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/ControlFlow/Transforms/StructuralTypeConversions.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -80,13 +81,11 @@ struct ConvertFunc : public OpConversionPattern<func::FuncOp> {
 
     SmallVector<Type> newArgTypes;
     SmallVector<Type> newResultTypes;
-    assert(op.getBody().getBlocks().size() == 1);
 
     // Any array-typed results become parameters.
-    Operation *ret = op.getBody().front().getTerminator();
-    for (Value result : ret->getOperands()) {
-      if (isa<ArrayType>(result.getType())) {
-        Type newType = converter.convertType(result.getType());
+    for (Type resultType : op.getResultTypes()) {
+      if (isa<ArrayType>(resultType)) {
+        Type newType = converter.convertType(resultType);
         conversion.addInputs(newType);
         newArgTypes.push_back(newType);
       }
@@ -472,6 +471,11 @@ void LowerArraysPass::runOnOperation() {
     assert(isa<ArrayRefType>(values.front().getType()));
     return ArrayRefToArrayOp::create(b, loc, type, values.front());
   });
+
+  // Functions may consist of multiple blocks, for example after coroutines
+  // have been lowered. Convert the arrays passed between blocks.
+  cf::populateCFStructuralTypeConversionsAndLegality(converter, patterns,
+                                                     target);
 
   patterns.add<ConvertFunc, ConvertReturn, ConvertCall,
                ConvertAggregateConstant, ConvertArrayGet, ConvertArrayInject,

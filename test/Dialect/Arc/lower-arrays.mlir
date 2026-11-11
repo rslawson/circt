@@ -170,3 +170,17 @@ func.func @test_nested_array_inject(%a: !hw.array<3x!hw.array<2xi32>>, %b: i2, %
   %0 = hw.array_inject %a[%b], %c : !hw.array<3x!hw.array<2xi32>>, i2
   return %0 : !hw.array<3x!hw.array<2xi32>>
 }
+
+// Functions with multiple blocks, for example lowered coroutines, convert
+// arrays passed between blocks.
+// CHECK-LABEL: func.func @MultipleBlocks
+// CHECK-SAME: ([[OUT:%.+]]: !arc.arrayref<2xi8>, [[A:%.+]]: !arc.arrayref<2xi8>, [[B:%.+]]: !arc.arrayref<2xi8>, [[C:%.+]]: i1)
+// CHECK:   cf.cond_br [[C]], ^[[BB1:.+]]([[A]] : !arc.arrayref<2xi8>), ^[[BB1]]([[B]] : !arc.arrayref<2xi8>)
+// CHECK: ^[[BB1]]([[X:%.+]]: !arc.arrayref<2xi8>):
+// CHECK:   [[RES:%.+]] = arc.arrayref.copy [[OUT]] = [[X]]
+// CHECK:   return [[RES]] : !arc.arrayref<2xi8>
+func.func @MultipleBlocks(%a: !hw.array<2xi8>, %b: !hw.array<2xi8>, %c: i1) -> !hw.array<2xi8> {
+  cf.cond_br %c, ^bb1(%a : !hw.array<2xi8>), ^bb1(%b : !hw.array<2xi8>)
+^bb1(%x: !hw.array<2xi8>):
+  return %x : !hw.array<2xi8>
+}
