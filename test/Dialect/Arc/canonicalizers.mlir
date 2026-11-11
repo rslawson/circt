@@ -70,6 +70,23 @@ arc.define @Passthrough2(%arg0: i32, %arg1: i32) -> (i32, i32) {
   arc.output %arg0, %arg1 : i32, i32
 }
 
+// States with non-integer results that are never enabled or always reset do
+// not fold to an implicit zero value.
+// CHECK-LABEL: hw.module @stateOpAggregateNoFold
+hw.module @stateOpAggregateNoFold(in %clk: !seq.clock, in %in: !hw.array<2xi8>, out out0: !hw.array<2xi8>, out out1: !hw.array<2xi8>) {
+  %true = hw.constant true
+  %false = hw.constant false
+  // CHECK: [[V0:%.+]] = arc.state @PassthroughArray(%in) clock %clk enable %false latency 1
+  %0 = arc.state @PassthroughArray(%in) clock %clk enable %false latency 1 : (!hw.array<2xi8>) -> !hw.array<2xi8>
+  // CHECK: [[V1:%.+]] = arc.state @PassthroughArray(%in) clock %clk reset %true latency 1
+  %1 = arc.state @PassthroughArray(%in) clock %clk reset %true latency 1 : (!hw.array<2xi8>) -> !hw.array<2xi8>
+  // CHECK: hw.output [[V0]], [[V1]]
+  hw.output %0, %1 : !hw.array<2xi8>, !hw.array<2xi8>
+}
+arc.define @PassthroughArray(%arg0: !hw.array<2xi8>) -> !hw.array<2xi8> {
+  arc.output %arg0 : !hw.array<2xi8>
+}
+
 // CHECK-LABEL: arc.model @StorageGetCanonicalizers
 arc.model @StorageGetCanonicalizers io !hw.modty<> {
 // CHECK-NEXT: ^bb

@@ -34,11 +34,16 @@ LogicalResult StateOp::fold(FoldAdaptor adaptor,
   if (getNumResults() > 0 && !getOperation()->hasAttr("name") &&
       !getOperation()->hasAttr("names")) {
     bool hasExplicitInitials = !getInitials().empty();
+    // The implicit initial and reset value is zero, which can only be
+    // materialized as an attribute for integer results.
+    bool allResultsInteger =
+        llvm::all_of(getResultTypes(), llvm::IsaPred<IntegerType>);
     bool allInitialsConstant =
         !hasExplicitInitials ||
         llvm::all_of(adaptor.getInitials(),
                      [&](Attribute attr) { return !!attr; });
-    if (isAlways(adaptor.getEnable(), false) && allInitialsConstant) {
+    if (isAlways(adaptor.getEnable(), false) && allInitialsConstant &&
+        (hasExplicitInitials || allResultsInteger)) {
       // Fold to the explicit or implicit initial value if
       // the state is never enabled and the initial values
       // are compile-time constants.
@@ -50,7 +55,8 @@ LogicalResult StateOp::fold(FoldAdaptor adaptor,
           results.push_back(IntegerAttr::get(resTy, 0));
       return success();
     }
-    if (!hasExplicitInitials && isAlways(adaptor.getReset(), true)) {
+    if (!hasExplicitInitials && allResultsInteger &&
+        isAlways(adaptor.getReset(), true)) {
       // We assume both the implicit initial value and the
       // implicit (synchronous) reset value to be zero.
       for (auto resTy : getResultTypes())
