@@ -23,6 +23,7 @@
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/raw_ostream.h"
 
 #ifdef ARC_RUNTIME_JIT_BIND
@@ -31,10 +32,14 @@
 #endif
 
 #include <cassert>
+#include <cctype>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <optional>
+#include <string>
+#include <vector>
 
 using namespace circt::arc::runtime;
 
@@ -184,6 +189,111 @@ uint64_t *arcRuntimeIR_swapTraceBuffer(const uint8_t *modelState) {
   return getModelInstance(statePtr)->swapTraceBuffer();
 }
 
+// --- Plusargs ---
+
+static std::vector<std::string> &getPlusArgs() {
+  static std::vector<std::string> plusArgs;
+  return plusArgs;
+}
+
+void arcRuntimeSetPlusArgs(int numArgs, const char *const *args) {
+  auto &plusArgs = getPlusArgs();
+  plusArgs.clear();
+  for (int i = 0; i < numArgs; ++i)
+    if (args[i][0] == '+')
+      plusArgs.emplace_back(args[i] + 1);
+}
+
+/// Find the first plusarg starting with the given prefix, and return the
+/// remainder of it after the prefix.
+static std::optional<llvm::StringRef> findPlusArg(llvm::StringRef prefix) {
+  for (auto &arg : getPlusArgs())
+    if (llvm::StringRef(arg).starts_with(prefix))
+      return llvm::StringRef(arg).drop_front(prefix.size());
+  return std::nullopt;
+}
+
+uint8_t arcRuntimeIR_testPlusArgs(const char *prefix) {
+  return findPlusArg(prefix).has_value();
+}
+
+uint8_t arcRuntimeIR_valuePlusArgs(const char *format, uint64_t *value,
+                                   uint32_t numBits) {
+  // Split the format into the prefix and the format specifier, skipping any
+  // field width.
+  llvm::StringRef formatRef(format);
+  auto percent = formatRef.find('%');
+  if (percent == llvm::StringRef::npos)
+    return 0;
+  auto prefix = formatRef.take_front(percent);
+  auto spec = formatRef.drop_front(percent + 1).ltrim("0123456789");
+  if (spec.empty())
+    return 0;
+  auto arg = findPlusArg(prefix);
+  if (!arg)
+    return 0;
+
+  // Parse the value according to the format specifier.
+  llvm::APInt result(std::max(numBits, 1u), 0);
+  switch (std::tolower(spec[0])) {
+  case 'd':
+  case 'h':
+  case 'x':
+  case 'o':
+  case 'b': {
+    unsigned radix = 10;
+    switch (std::tolower(spec[0])) {
+    case 'h':
+    case 'x':
+      radix = 16;
+      break;
+    case 'o':
+      radix = 8;
+      break;
+    case 'b':
+      radix = 2;
+      break;
+    }
+    auto digits = arg->trim();
+    bool negative = radix == 10 && digits.consume_front("-");
+    llvm::APInt parsed;
+    if (digits.getAsInteger(radix, parsed))
+      parsed = llvm::APInt(1, 0);
+    result = parsed.zextOrTrunc(result.getBitWidth());
+    if (negative)
+      result.negate();
+    break;
+  }
+  case 'e':
+  case 'f':
+  case 'g': {
+    double real = 0;
+    if (arg->trim().getAsDouble(real))
+      real = 0;
+    result = llvm::APInt(64, llvm::bit_cast<uint64_t>(real))
+                 .zextOrTrunc(result.getBitWidth());
+    break;
+  }
+  case 's': {
+    // Pack the characters into the integer, with the last character in the
+    // least significant bits.
+    for (char c : *arg) {
+      result <<= 8;
+      result |= llvm::APInt(result.getBitWidth(), static_cast<uint8_t>(c));
+    }
+    break;
+  }
+  default:
+    return 0;
+  }
+
+  // Write the result out as 64 bit words.
+  for (unsigned i = 0, e = llvm::divideCeil(numBits, 64); i < e; ++i)
+    value[i] = result.extractBitsAsZExtValue(
+        std::min(64u, result.getBitWidth() - i * 64), i * 64);
+  return 1;
+}
+
 void arcRuntimeIR_dumpFile(uint8_t *modelState, const char *fileName) {
   auto *statePtr = arcRuntimeGetStateFromModelState(modelState, 0);
   getModelInstance(statePtr)->setDumpFile(fileName);
@@ -203,7 +313,8 @@ static const APICallbacks apiCallbacksGlobal{
     &arcRuntimeIR_format,          &arcRuntimeIR_formatToStream,
     &arcRuntimeIR_getStdoutStream, &arcRuntimeIR_getStderrStream,
     &arcRuntimeIR_swapTraceBuffer, &arcRuntimeIR_dumpFile,
-    &arcRuntimeIR_dumpVars};
+    &arcRuntimeIR_dumpVars,        &arcRuntimeIR_testPlusArgs,
+    &arcRuntimeIR_valuePlusArgs};
 
 const APICallbacks &getArcRuntimeAPICallbacks() { return apiCallbacksGlobal; }
 

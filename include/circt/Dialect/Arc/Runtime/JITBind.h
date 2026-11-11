@@ -39,6 +39,9 @@ struct APICallbacks {
   uint64_t *(*fnSwapTraceBuffer)(const uint8_t *simState);
   void (*fnDumpFile)(uint8_t *simState, const char *fileName);
   void (*fnDumpVars)(uint8_t *simState);
+  uint8_t (*fnTestPlusArgs)(const char *prefix);
+  uint8_t (*fnValuePlusArgs)(const char *format, uint64_t *value,
+                             uint32_t numBits);
 
   static constexpr char symNameAllocInstance[] = "arcRuntimeIR_allocInstance";
   static constexpr char symNameDeleteInstance[] = "arcRuntimeIR_deleteInstance";
@@ -54,6 +57,8 @@ struct APICallbacks {
       "arcRuntimeIR_swapTraceBuffer";
   static constexpr char symNameDumpFile[] = "arcRuntimeIR_dumpFile";
   static constexpr char symNameDumpVars[] = "arcRuntimeIR_dumpVars";
+  static constexpr char symNameTestPlusArgs[] = "arcRuntimeIR_testPlusArgs";
+  static constexpr char symNameValuePlusArgs[] = "arcRuntimeIR_valuePlusArgs";
 };
 
 #ifdef ARC_RUNTIME_JITBIND_FNDECL

@@ -132,6 +132,21 @@ ARC_IR_EXPORT uint64_t *arcRuntimeIR_swapTraceBuffer(const uint8_t *modelState);
 ARC_IR_EXPORT void arcRuntimeIR_dumpFile(uint8_t *modelState,
                                          const char *fileName);
 
+/// Check whether a plusarg starting with the given prefix has been passed to
+/// the simulation. Corresponds to the `$test$plusargs` system function.
+/// Returns 1 if a matching plusarg was found, and 0 otherwise.
+ARC_IR_EXPORT uint8_t arcRuntimeIR_testPlusArgs(const char *prefix);
+
+/// Parse the value of the first plusarg matching the given format, which
+/// consists of a prefix followed by a single format specifier. The value is
+/// written to `value` as an integer of `numBits` bits, stored as 64 bit words
+/// starting with the least significant one. Corresponds to the
+/// `$value$plusargs` system function. Returns 1 if a matching plusarg was
+/// found, and 0 otherwise, in which case `value` is left unmodified.
+ARC_IR_EXPORT uint8_t arcRuntimeIR_valuePlusArgs(const char *format,
+                                                 uint64_t *value,
+                                                 uint32_t numBits);
+
 /// Start tracing the model instance, beginning with its current state.
 /// Corresponds to the `$dumpvars` system task. Has no effect if tracing has
 /// already started.

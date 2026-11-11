@@ -85,6 +85,7 @@
 
 #ifdef ARCILATOR_ENABLE_JIT
 #define ARC_RUNTIME_JITBIND_FNDECL
+#include "circt/Dialect/Arc/Runtime/ArcRuntime.h"
 #include "circt/Dialect/Arc/Runtime/Common.h"
 #include "circt/Dialect/Arc/Runtime/JITBind.h"
 #include "llvm/InitializePasses.h"
@@ -107,6 +108,12 @@ static llvm::cl::opt<std::string> inputFilename(llvm::cl::Positional,
                                                 llvm::cl::desc("<input file>"),
                                                 llvm::cl::init("-"),
                                                 llvm::cl::cat(mainCategory));
+
+static llvm::cl::list<std::string>
+    plusArgs(llvm::cl::Positional,
+             llvm::cl::desc("[+plusarg...] (passed to the simulation for "
+                            "$test$plusargs and $value$plusargs)"),
+             llvm::cl::cat(mainCategory));
 
 static llvm::cl::opt<std::string>
     outputFilename("o", llvm::cl::desc("Output filename"),
@@ -372,7 +379,12 @@ static void bindArcRuntimeSymbols(ExecutionEngine &executionEngine) {
     bindExecutionEngineSymbol(symbolMap, interner,
                               runtimeCallbacks.symNameDumpVars,
                               runtimeCallbacks.fnDumpVars);
-
+    bindExecutionEngineSymbol(symbolMap, interner,
+                              runtimeCallbacks.symNameTestPlusArgs,
+                              runtimeCallbacks.fnTestPlusArgs);
+    bindExecutionEngineSymbol(symbolMap, interner,
+                              runtimeCallbacks.symNameValuePlusArgs,
+                              runtimeCallbacks.fnValuePlusArgs);
     return symbolMap;
   });
 }
@@ -638,8 +650,13 @@ static LogicalResult processBuffer(
       return failure();
     }
 
-    if (!noJitRuntime)
+    if (!noJitRuntime) {
       bindArcRuntimeSymbols(**executionEngine);
+      SmallVector<const char *> plusArgPtrs;
+      for (auto &arg : plusArgs)
+        plusArgPtrs.push_back(arg.c_str());
+      arcRuntimeSetPlusArgs(plusArgPtrs.size(), plusArgPtrs.data());
+    }
 
     if (!jitObjectFile.empty())
       (*executionEngine)->dumpToObjectFile(jitObjectFile);
