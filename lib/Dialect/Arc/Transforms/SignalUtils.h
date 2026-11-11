@@ -91,6 +91,21 @@ void emitDrive(OpBuilder &builder, Location loc, Value arcContext,
 /// integer with `toBits` and `fromBits`.
 bool hasBitRepresentation(Type type);
 
+/// Check whether values of the given type can be held in signals and compared
+/// with `emitChanged`. This includes all types with a bit representation, as
+/// well as dynamic strings.
+bool isSupportedType(Type type);
+
+/// Check whether values of the given type are always updated as a whole, such
+/// that the pending bits of a delayed drive are tracked with a single bit.
+bool isOpaque(Type type);
+
+/// Get the width of the mask tracking the pending bits of a signal.
+unsigned getMaskWidth(Type type);
+
+/// Emit a check whether two values of a supported type differ.
+Value emitChanged(OpBuilder &builder, Location loc, Value lhs, Value rhs);
+
 /// Convert a value to a flat integer of the same bit width.
 Value toBits(OpBuilder &builder, Location loc, Value value);
 

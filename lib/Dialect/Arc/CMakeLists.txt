@@ -32,6 +32,7 @@ add_circt_dialect_library(CIRCTArc
   CIRCTComb
   CIRCTHW
   CIRCTSeq
+  CIRCTSim
   MLIRIR
   MLIRInferTypeOpInterface
   MLIRFuncDialect

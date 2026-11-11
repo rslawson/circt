@@ -190,5 +190,62 @@ ARC_IR_EXPORT void arcRuntimeIR_flushAll();
 /// already started.
 ARC_IR_EXPORT void arcRuntimeIR_dumpVars(uint8_t *modelState);
 
+//===----------------------------------------------------------------------===//
+// Dynamic Strings
+//===----------------------------------------------------------------------===//
+//
+// Dynamic strings are represented as pointers to immutable, NUL-terminated
+// character arrays. Strings created by the runtime are interned and remain
+// valid for the lifetime of the program. A null pointer is an empty string.
+
+/// Return an interned copy of the given string.
+ARC_IR_EXPORT const char *arcRuntimeIR_stringIntern(const char *str);
+
+/// Format the given arguments into a string, like `arcRuntimeIR_format`.
+ARC_IR_EXPORT const char *
+arcRuntimeIR_stringFormat(const circt::arc::runtime::FmtDescriptor *fmt, ...);
+
+/// Concatenate two strings.
+ARC_IR_EXPORT const char *arcRuntimeIR_stringConcat(const char *lhs,
+                                                    const char *rhs);
+
+/// Return the length of a string.
+ARC_IR_EXPORT int32_t arcRuntimeIR_stringLength(const char *str);
+
+/// Compare two strings lexicographically, like `strcmp`.
+ARC_IR_EXPORT int32_t arcRuntimeIR_stringCompare(const char *lhs,
+                                                 const char *rhs);
+
+/// Convert an integer of `numBits` bits, stored as 64 bit words starting with
+/// the least significant one, to a string. Each byte is interpreted as a
+/// character, with the most significant byte first. NUL bytes are skipped.
+ARC_IR_EXPORT const char *arcRuntimeIR_stringFromInt(const uint64_t *value,
+                                                     uint32_t numBits);
+
+/// Convert a string to an integer of `numBits` bits, stored as 64 bit words
+/// starting with the least significant one. The last character of the string
+/// forms the least significant byte.
+ARC_IR_EXPORT void arcRuntimeIR_stringToInt(const char *str, uint64_t *value,
+                                            uint32_t numBits);
+
+/// Return the character at the given index of a string, or 0 if the index is
+/// out of bounds.
+ARC_IR_EXPORT uint8_t arcRuntimeIR_stringGet(const char *str, int32_t index);
+
+/// Return the characters in the range `[start, end)` of a string, clamped to
+/// the bounds of the string.
+ARC_IR_EXPORT const char *arcRuntimeIR_stringSubstr(const char *str,
+                                                    int32_t start, int32_t end);
+
+/// Convert a string to upper case if `upper` is non-zero, or to lower case
+/// otherwise.
+ARC_IR_EXPORT const char *arcRuntimeIR_stringChangeCase(const char *str,
+                                                        uint8_t upper);
+
+/// Like `arcRuntimeIR_valuePlusArgs`, but for a format with a `%s` specifier
+/// and a dynamic string result.
+ARC_IR_EXPORT uint8_t arcRuntimeIR_valuePlusArgsString(const char *format,
+                                                       const char **value);
+
 // NOLINTEND(readability-identifier-naming)
 #endif // CIRCT_DIALECT_ARC_RUNTIME_IRINTERFACE_H

@@ -403,6 +403,39 @@ static void bindArcRuntimeSymbols(ExecutionEngine &executionEngine) {
     bindExecutionEngineSymbol(symbolMap, interner,
                               runtimeCallbacks.symNameFlushAll,
                               runtimeCallbacks.fnFlushAll);
+    bindExecutionEngineSymbol(symbolMap, interner,
+                              runtimeCallbacks.symNameStringIntern,
+                              runtimeCallbacks.fnStringIntern);
+    bindExecutionEngineSymbol(symbolMap, interner,
+                              runtimeCallbacks.symNameStringFormat,
+                              runtimeCallbacks.fnStringFormat);
+    bindExecutionEngineSymbol(symbolMap, interner,
+                              runtimeCallbacks.symNameStringConcat,
+                              runtimeCallbacks.fnStringConcat);
+    bindExecutionEngineSymbol(symbolMap, interner,
+                              runtimeCallbacks.symNameStringLength,
+                              runtimeCallbacks.fnStringLength);
+    bindExecutionEngineSymbol(symbolMap, interner,
+                              runtimeCallbacks.symNameStringCompare,
+                              runtimeCallbacks.fnStringCompare);
+    bindExecutionEngineSymbol(symbolMap, interner,
+                              runtimeCallbacks.symNameStringFromInt,
+                              runtimeCallbacks.fnStringFromInt);
+    bindExecutionEngineSymbol(symbolMap, interner,
+                              runtimeCallbacks.symNameStringToInt,
+                              runtimeCallbacks.fnStringToInt);
+    bindExecutionEngineSymbol(symbolMap, interner,
+                              runtimeCallbacks.symNameStringGet,
+                              runtimeCallbacks.fnStringGet);
+    bindExecutionEngineSymbol(symbolMap, interner,
+                              runtimeCallbacks.symNameStringSubstr,
+                              runtimeCallbacks.fnStringSubstr);
+    bindExecutionEngineSymbol(symbolMap, interner,
+                              runtimeCallbacks.symNameStringChangeCase,
+                              runtimeCallbacks.fnStringChangeCase);
+    bindExecutionEngineSymbol(symbolMap, interner,
+                              runtimeCallbacks.symNameValuePlusArgsString,
+                              runtimeCallbacks.fnValuePlusArgsString);
     return symbolMap;
   });
 }

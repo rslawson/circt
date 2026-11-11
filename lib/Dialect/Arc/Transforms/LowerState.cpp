@@ -549,7 +549,7 @@ void ModuleLowering::allocateSignalShadow(llhd::SignalOp op) {
     return;
   auto loc = op.getLoc();
   auto type = op.getType().getNestedType();
-  auto maskWidth = isa<FloatType>(type) ? 1 : hw::getBitWidth(type);
+  auto maskWidth = signals::getMaskWidth(type);
   storage.next =
       AllocStateOp::create(allocBuilder, loc, StateType::get(type), storageArg);
   storage.mask = AllocStateOp::create(
@@ -611,7 +611,7 @@ LogicalResult ModuleLowering::lowerPendingSignalUpdates() {
     auto oldValue = StateReadOp::create(builder, loc, storage.value);
     auto nextValue = StateReadOp::create(builder, loc, storage.next);
     Value newValue = nextValue;
-    if (!isa<FloatType>(type)) {
+    if (!signals::isOpaque(type)) {
       auto oldBits = signals::toBits(builder, loc, oldValue);
       auto nextBits = signals::toBits(builder, loc, nextValue);
       auto allOnes = hw::ConstantOp::create(
@@ -624,10 +624,7 @@ LogicalResult ModuleLowering::lowerPendingSignalUpdates() {
     }
     StateWriteOp::create(builder, loc, storage.value, newValue);
     StateWriteOp::create(builder, loc, storage.mask, zeroMask);
-    auto oldBits = signals::toBits(builder, loc, oldValue);
-    auto newBits = signals::toBits(builder, loc, newValue);
-    auto changed = comb::ICmpOp::create(builder, loc, comb::ICmpPredicate::ne,
-                                        oldBits, newBits);
+    auto changed = signals::emitChanged(builder, loc, oldValue, newValue);
     auto ifChangedOp = scf::IfOp::create(builder, loc, changed, false);
     builder.setInsertionPoint(ifChangedOp.thenYield());
     requestDelta(builder, loc);
@@ -640,7 +637,7 @@ LogicalResult ModuleLowering::lowerPendingSignalUpdates() {
 static SmallVector<Type, 4> getSignalStorageTypes(llhd::RefType type) {
   auto *context = type.getContext();
   auto nestedType = type.getNestedType();
-  auto maskWidth = isa<FloatType>(nestedType) ? 1 : hw::getBitWidth(nestedType);
+  auto maskWidth = signals::getMaskWidth(nestedType);
   return {StateType::get(nestedType), StateType::get(nestedType),
           StateType::get(IntegerType::get(context, maskWidth)),
           StateType::get(IntegerType::get(context, 64))};
@@ -666,7 +663,7 @@ ModuleLowering::lowerCoroutineSignals(CoroutineDefineOp defineOp) {
 
   for (auto type : argTypes)
     if (auto refType = dyn_cast<llhd::RefType>(type))
-      if (!signals::hasBitRepresentation(refType.getNestedType()))
+      if (!signals::isSupportedType(refType.getNestedType()))
         return defineOp.emitOpError()
                << "has signal argument of unsupported type " << refType;
 
@@ -785,7 +782,7 @@ ModuleLowering::lowerCoroutineSignals(CoroutineDefineOp defineOp) {
         delay = llhd::TimeToIntOp::create(builder, loc, driveOp.getTime());
       }
     }
-    if (!signals::hasBitRepresentation(value.getType()))
+    if (!signals::isSupportedType(value.getType()))
       return op->emitOpError()
              << "drives signal of unsupported type " << value.getType();
     if (enable) {
@@ -1466,11 +1463,8 @@ LogicalResult OpLowering::lower(CoroutineInstanceOp op) {
       auto prev = StateReadOp::create(module.builder, loc, prevSlot);
       StateWriteOp::create(module.builder, loc, prevSlot, input);
       Value changed;
-      if (signals::hasBitRepresentation(input.getType()))
-        changed =
-            comb::ICmpOp::create(module.builder, loc, comb::ICmpPredicate::ne,
-                                 signals::toBits(module.builder, loc, input),
-                                 signals::toBits(module.builder, loc, prev));
+      if (signals::isSupportedType(input.getType()))
+        changed = signals::emitChanged(module.builder, loc, input, prev);
       else
         return op.emitOpError() << "cannot detect changes of argument of type "
                                 << input.getType();
@@ -1533,12 +1527,10 @@ LogicalResult OpLowering::lower(CoroutineInstanceOp op) {
       auto newValue = call.getResult(2 + index);
       auto oldValue = StateReadOp::create(module.builder, loc, slot);
       StateWriteOp::create(module.builder, loc, slot, newValue);
-      if (!signals::hasBitRepresentation(newValue.getType()))
+      if (!signals::isSupportedType(newValue.getType()))
         continue;
       Value changed =
-          comb::ICmpOp::create(module.builder, loc, comb::ICmpPredicate::ne,
-                               signals::toBits(module.builder, loc, oldValue),
-                               signals::toBits(module.builder, loc, newValue));
+          signals::emitChanged(module.builder, loc, oldValue, newValue);
       anyResultChanged = anyResultChanged
                              ? comb::OrOp::create(module.builder, loc,
                                                   anyResultChanged, changed)
@@ -1552,9 +1544,7 @@ LogicalResult OpLowering::lower(CoroutineInstanceOp op) {
     for (auto [state, snapshot] : signalSnapshots) {
       auto current = StateReadOp::create(module.builder, loc, state);
       Value changed =
-          comb::ICmpOp::create(module.builder, loc, comb::ICmpPredicate::ne,
-                               signals::toBits(module.builder, loc, current),
-                               signals::toBits(module.builder, loc, snapshot));
+          signals::emitChanged(module.builder, loc, current, snapshot);
       anySignalChanged = anySignalChanged
                              ? comb::OrOp::create(module.builder, loc,
                                                   anySignalChanged, changed)
@@ -1990,8 +1980,8 @@ LogicalResult OpLowering::lowerDrive(Operation *op, Value signal, Value value,
     return failure();
 
   auto type = rootOp.getType().getNestedType();
-  if (!signals::hasBitRepresentation(type) ||
-      !signals::hasBitRepresentation(loweredValue.getType()))
+  if (!signals::isSupportedType(type) ||
+      !signals::isSupportedType(loweredValue.getType()))
     return op->emitOpError() << "drives signal of unsupported type " << type;
 
   // Drives in a module are executed whenever any of their operands change, as
@@ -2022,10 +2012,7 @@ LogicalResult OpLowering::lowerDrive(Operation *op, Value signal, Value value,
                                           module.storageArg);
     auto prev = StateReadOp::create(builder, loc, prevState);
     StateWriteOp::create(builder, loc, prevState, operand);
-    auto operandChanged =
-        comb::ICmpOp::create(builder, loc, comb::ICmpPredicate::ne,
-                             signals::toBits(builder, loc, operand),
-                             signals::toBits(builder, loc, prev));
+    auto operandChanged = signals::emitChanged(builder, loc, operand, prev);
     changed = comb::OrOp::create(builder, loc, changed, operandChanged);
   }
   auto ifChangedOp = scf::IfOp::create(builder, loc, changed, false);

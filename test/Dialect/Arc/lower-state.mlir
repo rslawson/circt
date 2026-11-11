@@ -1172,3 +1172,35 @@ arc.coroutine.define @ObserveCoroutine(%arg0: i8) -> (i1, i64) {
   %never = hw.constant -1 : i64
   arc.coroutine.halt %mask, %never : i1, i64
 }
+
+// Signals can hold dynamic strings. Changes are detected by comparing the
+// contents of the strings, and delayed drives always update the entire string.
+// CHECK-LABEL: arc.model @StringSignals
+func.func private @ConsumeString(!sim.dstring)
+hw.module @StringSignals(in %en: i1) {
+  // CHECK: [[S:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<!sim.dstring>
+  // CHECK: [[PREV:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<!sim.dstring>
+  // CHECK: [[NEXT:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<!sim.dstring>
+  // CHECK: [[MASK:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i1>
+  %init = sim.string.literal "a"
+  %s = llhd.sig %init : <!sim.dstring>
+  // CHECK: [[P:%.+]] = arc.state_read [[S]] : <!sim.dstring>
+  %p = llhd.prb %s : !sim.dstring
+  func.call @ConsumeString(%p) : (!sim.dstring) -> ()
+  // CHECK: [[STR:%.+]] = sim.string.concat ([[P]], [[P]])
+  // CHECK: [[OLDSTR:%.+]] = arc.state_read [[PREV]] : <!sim.dstring>
+  // CHECK: sim.string.cmp ne [[STR]], [[OLDSTR]] : !sim.dstring
+  // CHECK: arc.state_write [[NEXT]] = [[STR]] : <!sim.dstring>
+  // CHECK: [[TRUE:%.+]] = hw.constant true
+  // CHECK: [[OLDMASK:%.+]] = arc.state_read [[MASK]] : <i1>
+  // CHECK: comb.or [[OLDMASK]], [[TRUE]] : i1
+  %str = sim.string.concat (%p, %p)
+  %t = llhd.constant_time <1ns, 0d>
+  llhd.drv %s, %str after %t if %en : !sim.dstring
+  // Pending updates replace the entire string.
+  // CHECK: [[OLD:%.+]] = arc.state_read [[S]] : <!sim.dstring>
+  // CHECK: [[NEW:%.+]] = arc.state_read [[NEXT]] : <!sim.dstring>
+  // CHECK: arc.state_write [[S]] = [[NEW]] : <!sim.dstring>
+  // CHECK: sim.string.cmp ne [[OLD]], [[NEW]] : !sim.dstring
+  hw.output
+}

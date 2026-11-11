@@ -51,6 +51,17 @@ struct APICallbacks {
   uint8_t *(*fnGetFileStream)(int32_t descriptor);
   void (*fnFlushStream)(uint8_t *stream);
   void (*fnFlushAll)();
+  const char *(*fnStringIntern)(const char *str);
+  const char *(*fnStringFormat)(const FmtDescriptor *fmt, ...);
+  const char *(*fnStringConcat)(const char *lhs, const char *rhs);
+  int32_t (*fnStringLength)(const char *str);
+  int32_t (*fnStringCompare)(const char *lhs, const char *rhs);
+  const char *(*fnStringFromInt)(const uint64_t *value, uint32_t numBits);
+  void (*fnStringToInt)(const char *str, uint64_t *value, uint32_t numBits);
+  uint8_t (*fnStringGet)(const char *str, int32_t index);
+  const char *(*fnStringSubstr)(const char *str, int32_t start, int32_t end);
+  const char *(*fnStringChangeCase)(const char *str, uint8_t upper);
+  uint8_t (*fnValuePlusArgsString)(const char *format, const char **value);
 
   static constexpr char symNameAllocInstance[] = "arcRuntimeIR_allocInstance";
   static constexpr char symNameDeleteInstance[] = "arcRuntimeIR_deleteInstance";
@@ -74,6 +85,19 @@ struct APICallbacks {
   static constexpr char symNameGetFileStream[] = "arcRuntimeIR_getFileStream";
   static constexpr char symNameFlushStream[] = "arcRuntimeIR_flushStream";
   static constexpr char symNameFlushAll[] = "arcRuntimeIR_flushAll";
+  static constexpr char symNameStringIntern[] = "arcRuntimeIR_stringIntern";
+  static constexpr char symNameStringFormat[] = "arcRuntimeIR_stringFormat";
+  static constexpr char symNameStringConcat[] = "arcRuntimeIR_stringConcat";
+  static constexpr char symNameStringLength[] = "arcRuntimeIR_stringLength";
+  static constexpr char symNameStringCompare[] = "arcRuntimeIR_stringCompare";
+  static constexpr char symNameStringFromInt[] = "arcRuntimeIR_stringFromInt";
+  static constexpr char symNameStringToInt[] = "arcRuntimeIR_stringToInt";
+  static constexpr char symNameStringGet[] = "arcRuntimeIR_stringGet";
+  static constexpr char symNameStringSubstr[] = "arcRuntimeIR_stringSubstr";
+  static constexpr char symNameStringChangeCase[] =
+      "arcRuntimeIR_stringChangeCase";
+  static constexpr char symNameValuePlusArgsString[] =
+      "arcRuntimeIR_valuePlusArgsString";
 };
 
 #ifdef ARC_RUNTIME_JITBIND_FNDECL

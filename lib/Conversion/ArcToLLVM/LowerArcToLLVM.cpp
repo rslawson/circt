@@ -49,6 +49,7 @@
 #include "llvm/Support/FormatVariadic.h"
 
 #include <cstddef>
+#include <limits>
 
 #define DEBUG_TYPE "lower-arc-to-llvm"
 
@@ -950,6 +951,26 @@ foldFormatString(ConversionPatternRewriter &rewriter, Value fstringValue,
             false);
         return FormatInfo{{d}, {reg2mem(rewriter, op.getLoc(), op.getValue())}};
       })
+      .Case<sim::FormatStringOp>(
+          [&](sim::FormatStringOp op) -> FailureOr<FormatInfo> {
+            FmtDescriptor d = FmtDescriptor::createString(
+                op.getIsLeftAligned(), op.getSpecifierWidth().value_or(0),
+                op.getPaddingChar());
+            // The string is converted to a pointer, but the format ops are
+            // not converted themselves. Look through the materialization of
+            // the original string, or cast the string to its converted type.
+            auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+            Value value = op.getValue();
+            if (auto castOp = value.getDefiningOp<UnrealizedConversionCastOp>();
+                castOp && castOp.getInputs().size() == 1 &&
+                castOp.getInputs()[0].getType() == ptrType)
+              value = castOp.getInputs()[0];
+            else
+              value = UnrealizedConversionCastOp::create(rewriter, op.getLoc(),
+                                                         ptrType, value)
+                          .getResult(0);
+            return FormatInfo{{d}, {value}};
+          })
       .Case<sim::FormatLiteralOp>(
           [&](sim::FormatLiteralOp op) -> FailureOr<FormatInfo> {
             if (op.getLiteral().size() < 8 &&
@@ -985,21 +1006,26 @@ foldFormatString(ConversionPatternRewriter &rewriter, Value fstringValue,
 FailureOr<LLVM::CallOp> emitFmtCall(OpBuilder &builder, Location loc,
                                     StringCache &stringCache,
                                     ArrayRef<FmtDescriptor> descriptors,
-                                    ValueRange args, Value stream = {}) {
+                                    ValueRange args, Value stream = {},
+                                    bool toString = false) {
   ModuleOp moduleOp =
       builder.getInsertionBlock()->getParent()->getParentOfType<ModuleOp>();
   MLIRContext *ctx = builder.getContext();
   auto ptrType = LLVM::LLVMPointerType::get(ctx);
   SmallVector<Type, 2> paramTypes;
   StringRef symbolName = runtime::APICallbacks::symNameFormat;
+  Type resultType = LLVM::LLVMVoidType::get(ctx);
   if (stream) {
     symbolName = runtime::APICallbacks::symNameFormatToStream;
     paramTypes.push_back(ptrType);
+  } else if (toString) {
+    symbolName = runtime::APICallbacks::symNameStringFormat;
+    resultType = ptrType;
   }
   paramTypes.push_back(ptrType);
 
   auto func = LLVM::lookupOrCreateFn(builder, moduleOp, symbolName, paramTypes,
-                                     LLVM::LLVMVoidType::get(ctx), true);
+                                     resultType, true);
   if (failed(func))
     return func;
 
@@ -1153,13 +1179,38 @@ struct PlusArgsValueOpLowering
   matchAndRewrite(sim::PlusArgsValueOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     auto loc = op.getLoc();
-    auto resultType = dyn_cast<IntegerType>(op.getResult().getType());
-    if (!resultType)
-      return rewriter.notifyMatchFailure(op, "only integer results supported");
     auto moduleOp = op->getParentOfType<ModuleOp>();
     auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
     auto i8Type = rewriter.getI8Type();
     auto i32Type = rewriter.getI32Type();
+    Value format = stringCache.getOrCreate(rewriter, op.getFormatString());
+    auto zero = LLVM::ConstantOp::create(rewriter, loc, i8Type,
+                                         rewriter.getI8IntegerAttr(0));
+
+    // Dynamic strings are returned through a pointer-sized stack slot.
+    if (isa<sim::DynamicStringType>(op.getResult().getType())) {
+      auto func = LLVM::lookupOrCreateFn(
+          rewriter, moduleOp, runtime::APICallbacks::symNameValuePlusArgsString,
+          {ptrType, ptrType}, i8Type);
+      if (failed(func))
+        return failure();
+      auto one = LLVM::ConstantOp::create(rewriter, loc, i32Type,
+                                          rewriter.getI32IntegerAttr(1));
+      auto slot = LLVM::AllocaOp::create(rewriter, loc, ptrType, ptrType, one);
+      auto null = LLVM::ZeroOp::create(rewriter, loc, ptrType);
+      LLVM::StoreOp::create(rewriter, loc, null, slot);
+      auto call =
+          LLVM::CallOp::create(rewriter, loc, *func, ValueRange{format, slot});
+      Value found = LLVM::ICmpOp::create(rewriter, loc, LLVM::ICmpPredicate::ne,
+                                         call.getResult(), zero);
+      Value value = LLVM::LoadOp::create(rewriter, loc, ptrType, slot);
+      rewriter.replaceOp(op, {found, value});
+      return success();
+    }
+
+    auto resultType = dyn_cast<IntegerType>(op.getResult().getType());
+    if (!resultType)
+      return rewriter.notifyMatchFailure(op, "unsupported result type");
     auto func = LLVM::lookupOrCreateFn(
         rewriter, moduleOp, runtime::APICallbacks::symNameValuePlusArgs,
         {ptrType, ptrType, i32Type}, i8Type);
@@ -1178,13 +1229,10 @@ struct PlusArgsValueOpLowering
     LLVM::StoreOp::create(rewriter, loc, zeroWords, slot);
 
     // Call the runtime and read back the parsed value.
-    Value format = stringCache.getOrCreate(rewriter, op.getFormatString());
     auto bits = LLVM::ConstantOp::create(rewriter, loc, i32Type,
                                          rewriter.getI32IntegerAttr(numBits));
     auto call = LLVM::CallOp::create(rewriter, loc, *func,
                                      ValueRange{format, slot, bits});
-    auto zero = LLVM::ConstantOp::create(rewriter, loc, i8Type,
-                                         rewriter.getI8IntegerAttr(0));
     Value found = LLVM::ICmpOp::create(rewriter, loc, LLVM::ICmpPredicate::ne,
                                        call.getResult(), zero);
     Value value = LLVM::LoadOp::create(rewriter, loc, wordsType, slot);
@@ -1198,8 +1246,6 @@ struct PlusArgsValueOpLowering
 };
 
 // Lowers `sim.string.literal` to the address of a global string constant.
-// Dynamic strings are otherwise unsupported, but literals are commonly passed
-// to system tasks such as `$readmemh`.
 struct StringConstantOpLowering
     : public OpConversionPattern<sim::StringConstantOp> {
   StringConstantOpLowering(const TypeConverter &typeConverter,
@@ -1214,6 +1260,235 @@ struct StringConstantOpLowering
   }
 
   StringCache &stringCache;
+};
+
+// Lowers `sim.string.format_to_string` to a call of the runtime library, which
+// formats the arguments into a new string.
+struct FormatToStringOpLowering
+    : public OpConversionPattern<sim::FormatToStringOp> {
+  FormatToStringOpLowering(const TypeConverter &typeConverter,
+                           MLIRContext *context, StringCache &stringCache)
+      : OpConversionPattern(typeConverter, context), stringCache(stringCache) {}
+
+  LogicalResult
+  matchAndRewrite(sim::FormatToStringOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto formatInfo =
+        foldFormatString(rewriter, op.getFmtstring(), stringCache);
+    if (failed(formatInfo))
+      return rewriter.notifyMatchFailure(op, "unsupported format string");
+    formatInfo->descriptors.push_back(FmtDescriptor());
+    auto result =
+        emitFmtCall(rewriter, op.getLoc(), stringCache, formatInfo->descriptors,
+                    formatInfo->args, {}, /*toString=*/true);
+    if (failed(result))
+      return failure();
+    rewriter.replaceOp(op, result->getResults());
+    return success();
+  }
+
+  StringCache &stringCache;
+};
+
+// Lowers `sim.string.concat` to a sequence of calls of the runtime library,
+// each concatenating two strings.
+struct StringConcatOpLowering
+    : public OpConversionPattern<sim::StringConcatOp> {
+  StringConcatOpLowering(const TypeConverter &typeConverter,
+                         MLIRContext *context, StringCache &stringCache)
+      : OpConversionPattern(typeConverter, context), stringCache(stringCache) {}
+
+  LogicalResult
+  matchAndRewrite(sim::StringConcatOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto inputs = adaptor.getInputs();
+    if (inputs.empty()) {
+      rewriter.replaceOp(op, stringCache.getOrCreate(rewriter, ""));
+      return success();
+    }
+    auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+    auto func =
+        LLVM::lookupOrCreateFn(rewriter, op->getParentOfType<ModuleOp>(),
+                               runtime::APICallbacks::symNameStringConcat,
+                               {ptrType, ptrType}, ptrType);
+    if (failed(func))
+      return failure();
+    Value result = inputs.front();
+    for (auto input : inputs.drop_front())
+      result = LLVM::CallOp::create(rewriter, op.getLoc(), *func,
+                                    ValueRange{result, input})
+                   .getResult();
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+
+  StringCache &stringCache;
+};
+
+// Lowers `sim.string.cmp` to a call of the runtime library comparing the two
+// strings, followed by a comparison of the result against zero.
+struct StringCmpOpLowering : public OpConversionPattern<sim::StringCmpOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(sim::StringCmpOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+    auto i32Type = rewriter.getI32Type();
+    auto func =
+        LLVM::lookupOrCreateFn(rewriter, op->getParentOfType<ModuleOp>(),
+                               runtime::APICallbacks::symNameStringCompare,
+                               {ptrType, ptrType}, i32Type);
+    if (failed(func))
+      return failure();
+    auto call =
+        LLVM::CallOp::create(rewriter, op.getLoc(), *func,
+                             ValueRange{adaptor.getLhs(), adaptor.getRhs()});
+    auto zero = LLVM::ConstantOp::create(rewriter, op.getLoc(), i32Type,
+                                         rewriter.getI32IntegerAttr(0));
+    LLVM::ICmpPredicate predicate;
+    switch (op.getPredicate()) {
+    case sim::StringCmpPredicate::eq:
+      predicate = LLVM::ICmpPredicate::eq;
+      break;
+    case sim::StringCmpPredicate::ne:
+      predicate = LLVM::ICmpPredicate::ne;
+      break;
+    case sim::StringCmpPredicate::lt:
+      predicate = LLVM::ICmpPredicate::slt;
+      break;
+    case sim::StringCmpPredicate::le:
+      predicate = LLVM::ICmpPredicate::sle;
+      break;
+    case sim::StringCmpPredicate::gt:
+      predicate = LLVM::ICmpPredicate::sgt;
+      break;
+    case sim::StringCmpPredicate::ge:
+      predicate = LLVM::ICmpPredicate::sge;
+      break;
+    }
+    rewriter.replaceOpWithNewOp<LLVM::ICmpOp>(op, predicate, call.getResult(),
+                                              zero);
+    return success();
+  }
+};
+
+// Lowers `sim.string.int_to_string` to a call of the runtime library, passing
+// the integer through a stack slot.
+struct IntToStringOpLowering : public OpConversionPattern<sim::IntToStringOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(sim::IntToStringOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+    auto i32Type = rewriter.getI32Type();
+    auto func =
+        LLVM::lookupOrCreateFn(rewriter, op->getParentOfType<ModuleOp>(),
+                               runtime::APICallbacks::symNameStringFromInt,
+                               {ptrType, i32Type}, ptrType);
+    if (failed(func))
+      return failure();
+    auto numBits = op.getInput().getType().getIntOrFloatBitWidth();
+    Value slot = reg2mem(rewriter, loc, adaptor.getInput());
+    auto bits = LLVM::ConstantOp::create(rewriter, loc, i32Type,
+                                         rewriter.getI32IntegerAttr(numBits));
+    auto call =
+        LLVM::CallOp::create(rewriter, loc, *func, ValueRange{slot, bits});
+    LLVM::LifetimeEndOp::create(rewriter, loc, slot);
+    rewriter.replaceOp(op, call.getResults());
+    return success();
+  }
+};
+
+// Lowers `sim.string.string_to_int` to a call of the runtime library, which
+// writes the integer to a stack slot.
+struct StringToIntOpLowering : public OpConversionPattern<sim::StringToIntOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(sim::StringToIntOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto resultType = cast<IntegerType>(op.getResult().getType());
+    auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+    auto i32Type = rewriter.getI32Type();
+    auto func = LLVM::lookupOrCreateFn(
+        rewriter, op->getParentOfType<ModuleOp>(),
+        runtime::APICallbacks::symNameStringToInt, {ptrType, ptrType, i32Type},
+        LLVM::LLVMVoidType::get(rewriter.getContext()));
+    if (failed(func))
+      return failure();
+    unsigned numBits = resultType.getWidth();
+    auto numWords = std::max<int64_t>(llvm::divideCeil(numBits, 64), 1);
+    auto wordsType = rewriter.getIntegerType(numWords * 64);
+    auto one = LLVM::ConstantOp::create(rewriter, loc, i32Type,
+                                        rewriter.getI32IntegerAttr(1));
+    auto slot = LLVM::AllocaOp::create(rewriter, loc, ptrType, wordsType, one);
+    auto bits = LLVM::ConstantOp::create(rewriter, loc, i32Type,
+                                         rewriter.getI32IntegerAttr(numBits));
+    LLVM::CallOp::create(rewriter, loc, *func,
+                         ValueRange{adaptor.getInput(), slot, bits});
+    Value value = LLVM::LoadOp::create(rewriter, loc, wordsType, slot);
+    if (numBits != wordsType.getWidth())
+      value = LLVM::TruncOp::create(rewriter, loc, resultType, value);
+    rewriter.replaceOp(op, value);
+    return success();
+  }
+};
+
+// Lowers `sim.string.substr` to a call of the runtime library. A missing end
+// index selects the remainder of the string.
+struct StringSubstrOpLowering
+    : public OpConversionPattern<sim::StringSubstrOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(sim::StringSubstrOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+    auto i32Type = rewriter.getI32Type();
+    auto func =
+        LLVM::lookupOrCreateFn(rewriter, op->getParentOfType<ModuleOp>(),
+                               runtime::APICallbacks::symNameStringSubstr,
+                               {ptrType, i32Type, i32Type}, ptrType);
+    if (failed(func))
+      return failure();
+    Value end = adaptor.getEnd();
+    if (!end)
+      end = LLVM::ConstantOp::create(
+          rewriter, op.getLoc(), i32Type,
+          rewriter.getI32IntegerAttr(std::numeric_limits<int32_t>::max()));
+    rewriter.replaceOpWithNewOp<LLVM::CallOp>(
+        op, *func, ValueRange{adaptor.getStr(), adaptor.getStart(), end});
+    return success();
+  }
+};
+
+// Lowers `sim.string.toupper` and `sim.string.tolower` to a call of the runtime
+// library.
+template <typename SourceOp, bool upper>
+struct StringChangeCaseOpLowering : public OpConversionPattern<SourceOp> {
+  using OpConversionPattern<SourceOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(SourceOp op, typename SourceOp::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+    auto i8Type = rewriter.getI8Type();
+    auto func = LLVM::lookupOrCreateFn(
+        rewriter, op->template getParentOfType<ModuleOp>(),
+        runtime::APICallbacks::symNameStringChangeCase, {ptrType, i8Type},
+        ptrType);
+    if (failed(func))
+      return failure();
+    auto flag = LLVM::ConstantOp::create(rewriter, op.getLoc(), i8Type,
+                                         rewriter.getI8IntegerAttr(upper));
+    rewriter.replaceOpWithNewOp<LLVM::CallOp>(
+        op, *func, ValueRange{adaptor.getInput(), flag});
+    return success();
+  }
 };
 
 // Lowers `sim.sv.readmem` to a call of the runtime library, which updates a
@@ -2140,7 +2415,7 @@ void LowerArcToLLVMPass::runOnOperation() {
   // They are all marked Pure so are removed after the conversion.
   target.addLegalOp<sim::FormatLiteralOp, sim::FormatDecOp, sim::FormatHexOp,
                     sim::FormatBinOp, sim::FormatOctOp, sim::FormatCharOp,
-                    sim::FormatStringConcatOp>();
+                    sim::FormatStringOp, sim::FormatStringConcatOp>();
 
   // Setup the arc dialect type conversion.
   LLVMTypeConverter converter(&getContext());
@@ -2150,8 +2425,8 @@ void LowerArcToLLVMPass::runOnOperation() {
   converter.addConversion([&](StorageType type) {
     return LLVM::LLVMPointerType::get(type.getContext());
   });
-  // Dynamic strings are only supported as literals, represented as a pointer
-  // to a null-terminated string.
+  // Dynamic strings are represented as a pointer to an immutable,
+  // NUL-terminated string. A null pointer represents the empty string.
   converter.addConversion([&](sim::DynamicStringType type) {
     return LLVM::LLVMPointerType::get(type.getContext());
   });
@@ -2268,8 +2543,20 @@ void LowerArcToLLVMPass::runOnOperation() {
   StringCache stringCache;
   patterns.add<DumpFileOpLowering, PlusArgsTestOpLowering,
                PlusArgsValueOpLowering, SimEmitValueOpLowering,
-               SimPrintFormattedProcOpLowering, StringConstantOpLowering>(
+               SimPrintFormattedProcOpLowering, StringConstantOpLowering,
+               FormatToStringOpLowering, StringConcatOpLowering>(
       converter, &getContext(), stringCache);
+  patterns.add<StringCmpOpLowering, IntToStringOpLowering,
+               StringToIntOpLowering, StringSubstrOpLowering,
+               StringChangeCaseOpLowering<sim::StringToUpperOp, true>,
+               StringChangeCaseOpLowering<sim::StringToLowerOp, false>>(
+      converter, &getContext());
+  patterns.add<RuntimeCallLowering<sim::StringLengthOp>>(
+      converter, &getContext(), runtime::APICallbacks::symNameStringLength);
+  patterns.add<RuntimeCallLowering<sim::StringCompareOp>>(
+      converter, &getContext(), runtime::APICallbacks::symNameStringCompare);
+  patterns.add<RuntimeCallLowering<sim::StringGetOp>>(
+      converter, &getContext(), runtime::APICallbacks::symNameStringGet);
   patterns.add<RuntimeCallLowering<sim::SVFCloseOp>>(
       converter, &getContext(), runtime::APICallbacks::symNameFclose);
   patterns.add<RuntimeCallLowering<sim::SVChannelToOutputStreamOp>>(
