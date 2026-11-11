@@ -42,6 +42,10 @@ struct APICallbacks {
   uint8_t (*fnTestPlusArgs)(const char *prefix);
   uint8_t (*fnValuePlusArgs)(const char *format, uint64_t *value,
                              uint32_t numBits);
+  void (*fnReadMem)(const char *fileName, uint8_t *memory, uint64_t numWords,
+                    uint32_t wordBits, uint32_t wordStride, uint8_t isBinary,
+                    uint8_t descending, int64_t lowAddress,
+                    int64_t startAddress, int64_t finishAddress);
 
   static constexpr char symNameAllocInstance[] = "arcRuntimeIR_allocInstance";
   static constexpr char symNameDeleteInstance[] = "arcRuntimeIR_deleteInstance";
@@ -59,6 +63,7 @@ struct APICallbacks {
   static constexpr char symNameDumpVars[] = "arcRuntimeIR_dumpVars";
   static constexpr char symNameTestPlusArgs[] = "arcRuntimeIR_testPlusArgs";
   static constexpr char symNameValuePlusArgs[] = "arcRuntimeIR_valuePlusArgs";
+  static constexpr char symNameReadMem[] = "arcRuntimeIR_readMem";
 };
 
 #ifdef ARC_RUNTIME_JITBIND_FNDECL

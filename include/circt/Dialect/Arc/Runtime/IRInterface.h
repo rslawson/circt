@@ -147,6 +147,22 @@ ARC_IR_EXPORT uint8_t arcRuntimeIR_valuePlusArgs(const char *format,
                                                  uint64_t *value,
                                                  uint32_t numBits);
 
+/// Load the words of a memory from a file, following the format of the
+/// `$readmemh` and `$readmemb` system tasks. The memory consists of `numWords`
+/// words of `wordBits` bits each, stored `wordStride` bytes apart. If
+/// `descending` is set, the memory's address range is descending and the word
+/// at the lowest address is stored first. Otherwise the word at the highest
+/// address is stored first. `lowAddress` is the memory's lowest address. Unless
+/// `startAddress` is negative, loading starts at that address; unless
+/// `finishAddress` is negative, it stops at that address. Words not contained
+/// in the file keep their value.
+ARC_IR_EXPORT void arcRuntimeIR_readMem(const char *fileName, uint8_t *memory,
+                                        uint64_t numWords, uint32_t wordBits,
+                                        uint32_t wordStride, uint8_t isBinary,
+                                        uint8_t descending, int64_t lowAddress,
+                                        int64_t startAddress,
+                                        int64_t finishAddress);
+
 /// Start tracing the model instance, beginning with its current state.
 /// Corresponds to the `$dumpvars` system task. Has no effect if tracing has
 /// already started.
