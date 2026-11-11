@@ -198,6 +198,8 @@ def LowerProcessesPass : Pass<"arc-lower-processes", "mlir::ModuleOp"> {
     "comb::CombDialect",
     "hw::HWDialect",
     "llhd::LLHDDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::ub::UBDialect",
   ];
 }
 

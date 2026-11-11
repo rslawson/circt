@@ -34,6 +34,12 @@
 //   unit-independent sentinel `-1` when the wait has no delay. Each `llhd.halt`
 //   becomes an `arc.coroutine.halt` with an empty mask and the `-1` wakeup.
 //
+// - Lowers simulation control ops in the body that need access to the model
+//   context: `sim.terminate` and `sim.pause` become `arc.terminate`, and
+//   `llhd.current_time` reads the time via `arc.current_time`. A
+//   `ub.unreachable` terminator, which typically follows a `sim.terminate`,
+//   becomes a halt that yields zero values.
+//
 // - Replaces the original process with an `arc.coroutine.instance` that
 //   forwards the captured values.
 //
@@ -44,7 +50,10 @@
 #include "circt/Dialect/Comb/CombOps.h"
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/LLHD/LLHDOps.h"
+#include "circt/Dialect/Sim/SimOps.h"
 #include "mlir/Analysis/Liveness.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/IR/Dominance.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
@@ -76,8 +85,10 @@ struct ProcessLowering {
   LogicalResult run();
 
 private:
+  void replaceUnreachables();
   void collectCaptures();
   void createCoroutine();
+  void lowerSimulationOps();
   void addEntryAndResumeBlockArguments();
   LogicalResult rewriteTerminators();
   void renameCoroutineArgument(unsigned argIdx, Liveness &liveness,
@@ -123,6 +134,40 @@ private:
 //===----------------------------------------------------------------------===//
 // Helpers
 //===----------------------------------------------------------------------===//
+
+/// Materialize a zero value of the given type. Falls back to `ub.poison` for
+/// types that have no obvious zero value.
+static Value createZeroValue(OpBuilder &builder, Location loc, Type type) {
+  if (isa<FloatType>(type))
+    return arith::ConstantOp::create(builder, loc, builder.getZeroAttr(type));
+  if (isa<llhd::TimeType>(type))
+    return llhd::ConstantTimeOp::create(builder, loc, 0, "fs", 0);
+  auto bitWidth = hw::getBitWidth(type);
+  if (bitWidth < 0)
+    return ub::PoisonOp::create(builder, loc, type);
+  auto flatType = builder.getIntegerType(bitWidth);
+  Value value = hw::ConstantOp::create(builder, loc, flatType, 0);
+  if (type != flatType)
+    value = hw::BitcastOp::create(builder, loc, type, value);
+  return value;
+}
+
+/// Replace `ub.unreachable` terminators in the process body with `llhd.halt`
+/// ops that yield zero values. These terminators typically follow a
+/// `sim.terminate` op. Since `arc.terminate` only requests termination after
+/// the current evaluation, the coroutine has to suspend cleanly.
+void ProcessLowering::replaceUnreachables() {
+  SmallVector<ub::UnreachableOp> unreachables;
+  processOp.walk([&](ub::UnreachableOp op) { unreachables.push_back(op); });
+  for (auto op : unreachables) {
+    OpBuilder builder(op);
+    SmallVector<Value> yieldOperands;
+    for (auto type : processOp.getResultTypes())
+      yieldOperands.push_back(createZeroValue(builder, op.getLoc(), type));
+    llhd::HaltOp::create(builder, op.getLoc(), yieldOperands);
+    op.erase();
+  }
+}
 
 void ProcessLowering::collectCaptures() {
   auto &body = processOp.getBody();
@@ -191,6 +236,32 @@ void ProcessLowering::createCoroutine() {
   // Retrieve the context value in the entry block.
   builder.setInsertionPointToStart(&coroOp.getBody().front());
   inferredContext = InferredContextOp::create(builder, coroOp.getLoc());
+}
+
+/// Lower ops in the coroutine body that interact with the simulation and need
+/// access to the model context.
+void ProcessLowering::lowerSimulationOps() {
+  SmallVector<Operation *> ops;
+  coroOp.walk([&](Operation *op) {
+    if (isa<sim::TerminateOp, sim::PauseOp, llhd::CurrentTimeOp>(op))
+      ops.push_back(op);
+  });
+  for (auto *op : ops) {
+    OpBuilder builder(op);
+    auto loc = op->getLoc();
+    if (auto termOp = dyn_cast<sim::TerminateOp>(op)) {
+      TerminateOp::create(builder, loc, inferredContext, termOp.getSuccess());
+    } else if (isa<sim::PauseOp>(op)) {
+      // Non-interactive simulations terminate on `$stop`. Treat this as a
+      // failure, similar to other simulators.
+      TerminateOp::create(builder, loc, inferredContext, false);
+    } else if (auto timeOp = dyn_cast<llhd::CurrentTimeOp>(op)) {
+      auto now = CurrentTimeOp::create(builder, loc, inferredContext);
+      auto time = llhd::IntToTimeOp::create(builder, loc, now);
+      timeOp.replaceAllUsesWith(time.getResult());
+    }
+    op->erase();
+  }
 }
 
 /// Prepend the coroutine function-type prefix as leading block arguments to
@@ -461,8 +532,10 @@ void ProcessLowering::buildInstance() {
 }
 
 LogicalResult ProcessLowering::run() {
+  replaceUnreachables();
   collectCaptures();
   createCoroutine();
+  lowerSimulationOps();
   addEntryAndResumeBlockArguments();
   if (failed(rewriteTerminators()))
     return failure();
