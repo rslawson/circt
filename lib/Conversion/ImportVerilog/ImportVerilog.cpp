@@ -277,6 +277,9 @@ LogicalResult ImportDriver::prepareDriver(SourceMgr &sourceMgr) {
   driver.options
       .compilationFlags[slang::ast::CompilationFlags::IgnoreUnknownModules] =
       options.ignoreUnknownModules;
+  driver.options
+      .compilationFlags[slang::ast::CompilationFlags::RelaxStringConversions] =
+      options.relaxStringConversions;
   driver.options.compilationFlags[slang::ast::CompilationFlags::LintMode] =
       options.mode == ImportVerilogOptions::Mode::OnlyLint;
   driver.options
