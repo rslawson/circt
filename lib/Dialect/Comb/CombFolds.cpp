@@ -606,6 +606,11 @@ extractConcatToConcatExtract(ExtractOp op, ConcatOp innerCat,
   }
 
   if (reverseConcatArgs.size() == 1) {
+    // In graph regions, the extracted operand may be the extract op itself if
+    // it feeds back into the concatenation. The extract op is then trivially
+    // equal to itself, and there is nothing to simplify.
+    if (reverseConcatArgs[0] == op.getResult())
+      return failure();
     replaceOpAndCopyNamehint(rewriter, op, reverseConcatArgs[0]);
   } else {
     replaceOpWithNewOpAndCopyNamehint<ConcatOp>(
