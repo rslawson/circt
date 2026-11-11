@@ -74,45 +74,61 @@ struct InstBodyVisitor
           HierPathInfo{name, {}, direction, {{&expr.symbol, currentInstBody}}});
     };
 
-    auto *tempInstBody = currentInstBody;
-    while (tempInstBody) {
-      tempInstBody = tempInstBody->parentInstance->getParentScope()
-                         ->getContainingInstance();
-      if (tempInstBody == outermostInstBody) {
-        // The value flows upward: expose it as an output port on every module
-        // boundary between the symbol and the outermost module.
-        SmallVector<const slang::ast::InstanceSymbol *> instChain;
-        for (auto *b = currentInstBody; b && b != outermostInstBody;
-             b = b->parentInstance->getParentScope()->getContainingInstance())
-          instChain.push_back(b->parentInstance);
-        // Map each level of the chain to the body that module conversion
-        // will actually visit, descending from the outermost module: slang's
-        // getCanonicalBody only relates instances elaborated within the same
-        // parent body, so a body forced into existence by this reference
-        // does not defer to its equivalent in the canonical sibling subtree.
-        // The by-name lookup only happens at levels that left the canonical
-        // subtree, references on the canonical path skip it entirely.
-        SmallVector<const slang::ast::InstanceBodySymbol *> canonChain(
-            instChain.size());
-        const slang::ast::InstanceBodySymbol *parentCanon = outermostInstBody;
-        for (size_t i = instChain.size(); i-- > 0;) {
-          const slang::ast::InstanceSymbol *inst = instChain[i];
-          if (inst->getParentScope()->getContainingInstance() != parentCanon)
-            if (auto *resolved = parentCanon->find(inst->name))
-              if (auto *resolvedInst =
-                      resolved->as_if<slang::ast::InstanceSymbol>())
-                inst = resolvedInst;
-          canonChain[i] = getCanonicalBody(*inst);
-          parentCanon = canonChain[i];
-        }
-        for (size_t i = 0; i < instChain.size(); ++i) {
-          addHierPath(canonChain[i], hierName,
-                      slang::ast::ArgumentDirection::Out);
-          hierName = builder.getStringAttr(
-              instChain[i]->name + llvm::Twine(".") + hierName.getValue());
-        }
-        return;
+    auto parentOf = [](const slang::ast::InstanceBodySymbol *body)
+        -> const slang::ast::InstanceBodySymbol * {
+      return body->parentInstance->getParentScope()->getContainingInstance();
+    };
+
+    // Find the closest common ancestor of the module containing the symbol and
+    // the referencing module. If the symbol's module is an ancestor of the
+    // referencing module, the value flows downward only. If the referencing
+    // module is an ancestor, the value flows upward only. Otherwise, as for a
+    // reference into a sibling's subtree, it flows upward to the common
+    // ancestor and from there downward to the referencing module.
+    SmallPtrSet<const slang::ast::InstanceBodySymbol *, 8> referencingAncestors;
+    for (auto *b = outermostInstBody; b; b = parentOf(b))
+      referencingAncestors.insert(b);
+    const slang::ast::InstanceBodySymbol *commonInstBody = nullptr;
+    for (auto *b = currentInstBody; b; b = parentOf(b))
+      if (referencingAncestors.contains(b)) {
+        commonInstBody = b;
+        break;
       }
+
+    // The value flows upward: expose it as an output port on every module
+    // boundary between the symbol and the common ancestor.
+    if (commonInstBody && commonInstBody != currentInstBody) {
+      SmallVector<const slang::ast::InstanceSymbol *> instChain;
+      for (auto *b = currentInstBody; b && b != commonInstBody; b = parentOf(b))
+        instChain.push_back(b->parentInstance);
+      // Map each level of the chain to the body that module conversion will
+      // actually visit, descending from the common ancestor: slang's
+      // getCanonicalBody only relates instances elaborated within the same
+      // parent body, so a body forced into existence by this reference does
+      // not defer to its equivalent in the canonical sibling subtree. The
+      // by-name lookup only happens at levels that left the canonical
+      // subtree, references on the canonical path skip it entirely.
+      SmallVector<const slang::ast::InstanceBodySymbol *> canonChain(
+          instChain.size());
+      const slang::ast::InstanceBodySymbol *parentCanon = commonInstBody;
+      for (size_t i = instChain.size(); i-- > 0;) {
+        const slang::ast::InstanceSymbol *inst = instChain[i];
+        if (inst->getParentScope()->getContainingInstance() != parentCanon)
+          if (auto *resolved = parentCanon->find(inst->name))
+            if (auto *resolvedInst =
+                    resolved->as_if<slang::ast::InstanceSymbol>())
+              inst = resolvedInst;
+        canonChain[i] = getCanonicalBody(*inst);
+        parentCanon = canonChain[i];
+      }
+      for (size_t i = 0; i < instChain.size(); ++i) {
+        addHierPath(canonChain[i], hierName,
+                    slang::ast::ArgumentDirection::Out);
+        hierName = builder.getStringAttr(instChain[i]->name + llvm::Twine(".") +
+                                         hierName.getValue());
+      }
+      if (commonInstBody == outermostInstBody)
+        return;
     }
 
     // The value flows downward: route it as an input port from the common
@@ -121,13 +137,13 @@ struct InstBodyVisitor
         collectHierarchicalPaths = [&](auto sym) {
           addHierPath(getCanonicalBody(*sym->parentInstance), hierName,
                       slang::ast::ArgumentDirection::In);
-          parentInstBody =
-              sym->parentInstance->getParentScope()->getContainingInstance();
-          if (parentInstBody && parentInstBody != currentInstBody)
+          parentInstBody = parentOf(sym);
+          if (parentInstBody && parentInstBody != commonInstBody)
             collectHierarchicalPaths(parentInstBody);
         };
-    hierName = builder.getStringAttr(currentInstBody->parentInstance->name +
-                                     llvm::Twine(".") + hierName.getValue());
+    if (!commonInstBody || commonInstBody == currentInstBody)
+      hierName = builder.getStringAttr(currentInstBody->parentInstance->name +
+                                       llvm::Twine(".") + hierName.getValue());
     collectHierarchicalPaths(outermostInstBody);
   }
 

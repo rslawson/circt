@@ -1246,11 +1246,50 @@ struct ModulePredeclaration {
     return success();
   }
 
+  /// Check whether the values of all hierarchical references that are passed
+  /// into an instance are available. They may be outputs of other instances,
+  /// such as a reference into a sibling instance's subtree.
+  bool hasHierarchicalInputs(const slang::ast::Symbol &member) {
+    const auto *instNode = member.as_if<slang::ast::InstanceSymbol>();
+    if (!instNode || instNode->body.getDefinition().definitionKind ==
+                         slang::ast::DefinitionKind::Interface)
+      return true;
+    for (const auto &hierPath : context.hierPaths[getCanonicalBody(*instNode)])
+      if (hierPath.hierName &&
+          hierPath.direction == slang::ast::ArgumentDirection::In &&
+          !llvm::any_of(hierPath.valueSyms, [&](auto &alias) {
+            return context.valueSymbols.lookup(alias.first);
+          }))
+        return false;
+    return true;
+  }
+
   LogicalResult predeclareModuleInstanceScope(const slang::ast::Scope &scope,
                                               StringRef blockNamePrefix) {
-    for (auto &member : scope.members())
+    // Instantiate modules in source order, but defer instances that receive
+    // hierarchical references from instances that come later.
+    SmallVector<const slang::ast::Symbol *> deferred;
+    for (auto &member : scope.members()) {
+      if (!hasHierarchicalInputs(member)) {
+        deferred.push_back(&member);
+        continue;
+      }
       if (failed(predeclareModuleInstanceMember(member, blockNamePrefix)))
         return failure();
+    }
+    while (!deferred.empty()) {
+      auto ready = llvm::find_if(deferred, [&](auto *member) {
+        return hasHierarchicalInputs(*member);
+      });
+      // If no deferred instance can be resolved, convert the first one anyway
+      // to report the unresolved reference.
+      if (ready == deferred.end())
+        ready = deferred.begin();
+      auto *member = *ready;
+      deferred.erase(ready);
+      if (failed(predeclareModuleInstanceMember(*member, blockNamePrefix)))
+        return failure();
+    }
     return success();
   }
 
