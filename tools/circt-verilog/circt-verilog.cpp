@@ -245,6 +245,11 @@ struct CLOptions {
                "interface, and programs."),
       cl::init(false), cl::cat(cat)};
 
+  cl::opt<bool> relaxStringConversions{
+      "relax-string-conversions",
+      cl::desc("Allow integral values to be implicitly converted to strings."),
+      cl::init(false), cl::cat(cat)};
+
   cl::list<std::string> topModules{
       "top",
       cl::desc("One or more top-level modules to instantiate (instead of "
@@ -379,6 +384,7 @@ static LogicalResult executeWithSources(MLIRContext *context,
     options.timeScale = opts.timeScale;
   options.allowUseBeforeDeclare = opts.allowUseBeforeDeclare;
   options.ignoreUnknownModules = opts.ignoreUnknownModules;
+  options.relaxStringConversions = opts.relaxStringConversions;
   if (opts.loweringMode != LoweringMode::OnlyLint)
     options.topModules = opts.topModules;
   options.paramOverrides = opts.paramOverrides;
