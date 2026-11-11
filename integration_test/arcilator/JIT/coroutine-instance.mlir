@@ -107,7 +107,6 @@ hw.module @CoroutineProc(out o: i42) {
 // VCD-NEXT:   $var wire 42 [[ID:[^ ]+]] o $end
 // VCD:       #0
 // VCD-NEXT:  b{{0*}} [[ID]]
-// VCD-NEXT:  #0
 // VCD-NEXT:  b{{0*}}101010 [[ID]]
 // VCD-NEXT:  #100
 // VCD-NEXT:  b{{0*}}101011 [[ID]]

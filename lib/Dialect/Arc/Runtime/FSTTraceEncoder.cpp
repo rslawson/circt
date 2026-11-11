@@ -174,7 +174,8 @@ bool FSTTraceEncoder::initialize(const ArcState *state) {
   fstWriterSetUpscope(fstWriter);
 
   // Dump the entire initial state
-  fstWriterEmitTimeChange(fstWriter, 0);
+  fstWriterEmitTimeChange(
+      fstWriter, *reinterpret_cast<const uint64_t *>(state->modelState));
   std::string valStr;
   for (const auto &sig : signalTable) {
     assert(sig.stateOffset < modelInfo->numStateBytes);

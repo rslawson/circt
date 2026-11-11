@@ -231,8 +231,9 @@ bool VCDTraceEncoder::initialize(const ArcState *state) {
   createHierarchy();
   outFile << "$upscope $end\n";
   outFile << "$enddefinitions $end\n";
-  // Dump the entire initial state
-  outFile << "#0\n";
+  // Dump the entire initial state at the current time
+  lastTimestamp = *reinterpret_cast<const uint64_t *>(state->modelState);
+  outFile << '#' << lastTimestamp << '\n';
   std::string outstring;
   for (const auto &sig : signalTable) {
     assert(sig.stateOffset < modelInfo->numStateBytes);
@@ -246,13 +247,20 @@ bool VCDTraceEncoder::initialize(const ArcState *state) {
 
 void VCDTraceEncoder::startUpWorker() { workerStep = -1; }
 
+void VCDTraceEncoder::writeTimestamp(uint64_t simTime) {
+  if (simTime == lastTimestamp)
+    return;
+  lastTimestamp = simTime;
+  writeTimestepToBuffer(simTime, workerOutBuffer);
+}
+
 void VCDTraceEncoder::encode(TraceBuffer &work) {
   size_t offset = 0;
   assert(workerStep <= work.firstStep);
   if (workerStep != work.firstStep) {
     // The new buffer starts at a different step than the previous one ended on
     workerStep = work.firstStep;
-    writeTimestepToBuffer(work.firstSimTime, workerOutBuffer);
+    writeTimestamp(work.firstSimTime);
   }
   // Walk through the the buffer
   const uint64_t *basePtr = work.getData();
@@ -274,7 +282,7 @@ void VCDTraceEncoder::encode(TraceBuffer &work) {
     // Check if we have reached a new time step marker
     if (stepIter != work.stepMarkers.end() && stepIter->offset == offset) {
       workerStep += stepIter->numSteps;
-      writeTimestepToBuffer(stepIter->simTime, workerOutBuffer);
+      writeTimestamp(stepIter->simTime);
       stepIter++;
     }
   }
@@ -296,7 +304,8 @@ void VCDTraceEncoder::finalize(const ArcState *state) {
     assert(workerStep <= getTimeStep());
     uint64_t finalSimTime =
         *reinterpret_cast<const uint64_t *>(state->modelState);
-    outFile << '#' << finalSimTime << '\n';
+    if (finalSimTime != lastTimestamp)
+      outFile << '#' << finalSimTime << '\n';
     outFile.close();
   }
 }

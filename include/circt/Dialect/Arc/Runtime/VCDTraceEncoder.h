@@ -84,6 +84,10 @@ private:
   void initSignalTable();
   /// Build and dump the signal hierarchy
   void createHierarchy();
+  /// Write a timestamp to the worker's buffer, unless it matches the last
+  /// timestamp written. Multiple evaluations of the model at the same time,
+  /// such as delta cycles, are thus merged into a single timestamp.
+  void writeTimestamp(uint64_t simTime);
 
   /// Path to the output file
   const std::filesystem::path outFilePath;
@@ -98,6 +102,8 @@ private:
   std::vector<char> workerOutBuffer;
   /// Current time step of the worker thread
   int64_t workerStep;
+  /// The last timestamp written to the trace file
+  uint64_t lastTimestamp = 0;
 };
 
 } // namespace circt::arc::runtime::impl
