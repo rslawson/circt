@@ -485,3 +485,14 @@ func.func @Strings(%a: !sim.dstring, %b: !sim.dstring, %i: i32, %x: i16) {
   %10, %11 = sim.plusargs.value "name=%s" : !sim.dstring
   return
 }
+
+func.func private @dpi_impl(%arg0: !sim.dstring) -> !sim.dstring
+
+// CHECK-LABEL: llvm.func @UnclockedDPICall
+// CHECK-SAME: (%[[A:.*]]: !llvm.ptr)
+func.func @UnclockedDPICall(%a: !sim.dstring) -> !sim.dstring {
+  // CHECK: %[[RES:.*]] = llvm.call @dpi_impl(%[[A]]) : (!llvm.ptr) -> !llvm.ptr
+  // CHECK: llvm.return %[[RES]]
+  %0 = sim.func.dpi.call @dpi_impl(%a) : (!sim.dstring) -> !sim.dstring
+  return %0 : !sim.dstring
+}
