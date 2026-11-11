@@ -3751,6 +3751,20 @@ static LogicalResult convert(StopBIOp op, StopBIOp::Adaptor adaptor,
   return success();
 }
 
+// moore.builtin.dumpfile -> sim.dump_file
+static LogicalResult convert(DumpFileBIOp op, DumpFileBIOp::Adaptor adaptor,
+                             ConversionPatternRewriter &rewriter) {
+  rewriter.replaceOpWithNewOp<sim::DumpFileOp>(op, op.getFilenameAttr());
+  return success();
+}
+
+// moore.builtin.dumpvars -> sim.dump_vars
+static LogicalResult convert(DumpVarsBIOp op, DumpVarsBIOp::Adaptor adaptor,
+                             ConversionPatternRewriter &rewriter) {
+  rewriter.replaceOpWithNewOp<sim::DumpVarsOp>(op);
+  return success();
+}
+
 // moore.builtin.finish -> sim.terminate
 static LogicalResult convert(FinishBIOp op, FinishBIOp::Adaptor adaptor,
                              ConversionPatternRewriter &rewriter) {
@@ -4420,6 +4434,8 @@ static void populateOpConversion(ConversionPatternSet &patterns,
   // Simulation control
   patterns.add<StopBIOp>(convert);
   patterns.add<SeverityBIOp>(convert);
+  patterns.add<DumpFileBIOp>(convert);
+  patterns.add<DumpVarsBIOp>(convert);
   patterns.add<FinishBIOp>(convert);
   patterns.add<FinishMessageBIOp>(convert);
 

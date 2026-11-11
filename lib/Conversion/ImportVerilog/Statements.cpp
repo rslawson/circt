@@ -1277,6 +1277,34 @@ struct StmtVisitor {
       return true;
     }
 
+    // Value change dump tasks. The scope selection of `$dumpvars` is not
+    // supported; all variables are dumped. The remaining tasks that control
+    // the dump are ignored.
+
+    if (nameId == ksn::DumpFile) {
+      std::string filename = "dump.vcd";
+      if (args.size() >= 1) {
+        auto value = context.evaluateConstant(*args[0]);
+        if (!value.isString() && !value.isInteger())
+          return mlir::emitError(loc)
+                 << "unsupported non-constant file name in `$dumpfile`";
+        filename = value.isString() ? value.str() : value.convertToStr().str();
+      }
+      moore::DumpFileBIOp::create(builder, loc,
+                                  builder.getStringAttr(filename));
+      return true;
+    }
+
+    if (nameId == ksn::DumpVars) {
+      moore::DumpVarsBIOp::create(builder, loc);
+      return true;
+    }
+
+    if (nameId == ksn::DumpOff || nameId == ksn::DumpOn ||
+        nameId == ksn::DumpAll || nameId == ksn::DumpFlush ||
+        nameId == ksn::DumpLimit)
+      return true;
+
     // Timescale tasks (`$printtimescale`)
 
     if (nameId == ksn::PrintTimeScale) {

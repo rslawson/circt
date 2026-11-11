@@ -1436,6 +1436,28 @@ def TerminateOp : SimOp<"terminate", [ProceduralOp]> {
   }];
 }
 
+def DumpFileOp : SimOp<"dump_file", [ProceduralOp]> {
+  let summary = "Set the name of the value change dump file";
+  let description = [{
+    Specifies the name of the file that a subsequent `sim.dump_vars` dumps the
+    simulation's values to. Corresponds to the `$dumpfile` system task in
+    SystemVerilog.
+  }];
+  let arguments = (ins StrAttr:$filename);
+  let assemblyFormat = "$filename attr-dict";
+}
+
+def DumpVarsOp : SimOp<"dump_vars", [ProceduralOp]> {
+  let summary = "Start dumping values to the value change dump file";
+  let description = [{
+    Starts dumping the values of the simulation to the file specified by
+    `sim.dump_file`, or to `dump.vcd` if no file has been specified. Executing
+    this op again after dumping has started has no effect. Corresponds to the
+    `$dumpvars` system task in SystemVerilog, without its scope selection.
+  }];
+  let assemblyFormat = "attr-dict";
+}
+
 def PauseOp : SimOp<"pause", [ProceduralOp]> {
   let summary = "Pause the simulation";
   let description = [{

@@ -1797,6 +1797,11 @@ func.func @SimulationControl() {
   // CHECK-NEXT: sim.terminate failure, quiet
   moore.builtin.finish 42
 
+  // CHECK-NEXT: sim.dump_file "waves.vcd"
+  moore.builtin.dumpfile "waves.vcd"
+  // CHECK-NEXT: sim.dump_vars
+  moore.builtin.dumpvars
+
   return
 }
 

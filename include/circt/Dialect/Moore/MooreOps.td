@@ -3292,6 +3292,31 @@ def FinishBIOp : Builtin<"finish"> {
   let assemblyFormat = "$exitCode attr-dict";
 }
 
+def DumpFileBIOp : Builtin<"dumpfile"> {
+  let summary = "Set the name of the value change dump file";
+  let description = [{
+    Corresponds to the `$dumpfile` system task. Specifies the name of the file
+    that the variables selected by a subsequent `$dumpvars` are written to.
+
+    See IEEE 1800-2017 § 21.7.1.1 "Specifying name of dump file (`$dumpfile`)".
+  }];
+  let arguments = (ins StrAttr:$filename);
+  let assemblyFormat = "$filename attr-dict";
+}
+
+def DumpVarsBIOp : Builtin<"dumpvars"> {
+  let summary = "Start dumping variables to the value change dump file";
+  let description = [{
+    Corresponds to the `$dumpvars` system task. Starts dumping the values of
+    variables to the file specified by `$dumpfile`. The scope selection of the
+    system task is not represented; all variables are dumped.
+
+    See IEEE 1800-2017 § 21.7.1.2 "Specifying variables to be dumped
+    (`$dumpvars`)".
+  }];
+  let assemblyFormat = "attr-dict";
+}
+
 def FinishMessageBIOp : Builtin<"finish_message"> {
   let summary = "Print diagnostic message for the finish system task";
   let description = [{

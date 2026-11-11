@@ -482,6 +482,10 @@ func.func @SimulationControlBuiltins() {
   moore.builtin.finish 42
   // CHECK: moore.builtin.finish_message false
   moore.builtin.finish_message false
+  // CHECK: moore.builtin.dumpfile "waves.vcd"
+  moore.builtin.dumpfile "waves.vcd"
+  // CHECK: moore.builtin.dumpvars
+  moore.builtin.dumpvars
   // CHECK: moore.unreachable
   moore.unreachable
 }
