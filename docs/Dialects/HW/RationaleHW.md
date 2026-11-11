@@ -80,6 +80,23 @@ constructs that work with the inout type.  These aren't necessary
 for combinational logic, but are nonetheless pretty useful when generating
 Verilog.
 
+### `array` Type
+
+Arrays are indexed from 0. Operations that create arrays from a list of
+elements, such as `hw.array_create` and `hw.array_concat`, list the elements
+from the highest index to the lowest, similar to a SystemVerilog concatenation.
+When an array is converted to an integer with `hw.bitcast`, element 0 occupies
+the least significant bits of the integer, followed by element 1, and so on.
+For example, `hw.array_create %a, %b : i8` produces an array whose element 0 is
+`%b`, and bitcasting it to `i16` yields `%b` in bits 0 to 7 and `%a` in bits 8
+to 15. This matches a packed SystemVerilog array `logic [1:0][7:0]`.
+
+### `struct` Type
+
+When a struct is converted to an integer with `hw.bitcast`, its first field
+occupies the most significant bits of the integer, similar to a packed
+SystemVerilog struct.
+
 ### `enum` Type
 
 Enum types have the property that the bit width of the type is the minimum 
