@@ -444,6 +444,18 @@ def SplitLoops : Pass<"arc-split-loops", "mlir::ModuleOp"> {
   ];
 }
 
+def LowerGlobalSignals : Pass<"arc-lower-global-signals", "mlir::ModuleOp"> {
+  let summary = "Replace global signals with signals passed through ports";
+  let description = [{
+    Replaces each `llhd.global_signal` with an `llhd.sig` in every root module
+    of the instance hierarchy that uses it, directly or through its instances.
+    Modules below the roots receive a reference to the signal through an
+    additional input port, and `llhd.get_global_signal` ops are replaced with
+    the signal or port.
+  }];
+  let dependentDialects = ["hw::HWDialect", "llhd::LLHDDialect"];
+}
+
 def StripSV : Pass<"arc-strip-sv", "mlir::ModuleOp"> {
   let summary = "Remove SV wire, reg, and assigns";
   let dependentDialects = ["arc::ArcDialect", "comb::CombDialect",

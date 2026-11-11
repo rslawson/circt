@@ -32,6 +32,7 @@ add_circt_dialect_library(CIRCTArcTransforms
   SimplifyVariadicOps.cpp
   SplitFuncs.cpp
   SplitLoops.cpp
+  LowerGlobalSignals.cpp
   StripSV.cpp
 
   DEPENDS
