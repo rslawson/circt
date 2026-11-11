@@ -548,15 +548,12 @@ void ModuleLowering::allocateSignalShadow(llhd::SignalOp op) {
   if (storage.next)
     return;
   auto loc = op.getLoc();
-  auto type = op.getType().getNestedType();
-  auto maskWidth = signals::getMaskWidth(type);
-  storage.next =
-      AllocStateOp::create(allocBuilder, loc, StateType::get(type), storageArg);
-  storage.mask = AllocStateOp::create(
-      allocBuilder, loc, StateType::get(allocBuilder.getIntegerType(maskWidth)),
-      storageArg);
-  storage.time = AllocStateOp::create(
-      allocBuilder, loc, StateType::get(allocBuilder.getI64Type()), storageArg);
+  auto types = signals::getStorageTypes(op.getType().getNestedType());
+  SmallVector<Value, 6> states{storage.value};
+  for (auto type : ArrayRef(types).drop_front())
+    states.push_back(AllocStateOp::create(allocBuilder, loc,
+                                          cast<StateType>(type), storageArg));
+  storage = SignalStorage::fromStates(states);
 }
 
 /// Request a re-evaluation of the model in the current time step.
@@ -574,12 +571,22 @@ LogicalResult ModuleLowering::lowerPendingSignalUpdates() {
       continue;
     auto loc = op->getLoc();
     auto type = cast<StateType>(storage.value.getType()).getType();
+    bool isElementwise = signals::isElementwise(type);
 
-    // Check if an update is pending.
-    auto mask = StateReadOp::create(builder, loc, storage.mask);
-    auto zeroMask = hw::ConstantOp::create(builder, loc, mask.getType(), 0);
-    auto pending = comb::ICmpOp::create(builder, loc, comb::ICmpPredicate::ne,
-                                        mask, zeroMask);
+    // Check if an update is pending. Elementwise signals track the range of
+    // elements with pending bits, which is empty if its end is zero.
+    Value mask, zeroMask, pending;
+    if (isElementwise) {
+      auto high = StateReadOp::create(builder, loc, storage.high);
+      auto zero = hw::ConstantOp::create(builder, loc, high.getType(), 0);
+      pending = comb::ICmpOp::create(builder, loc, comb::ICmpPredicate::ne,
+                                     high, zero);
+    } else {
+      mask = StateReadOp::create(builder, loc, storage.mask);
+      zeroMask = hw::ConstantOp::create(builder, loc, mask.getType(), 0);
+      pending = comb::ICmpOp::create(builder, loc, comb::ICmpPredicate::ne,
+                                     mask, zeroMask);
+    }
     auto ifPendingOp = scf::IfOp::create(builder, loc, pending, false);
     OpBuilder::InsertionGuard guard(builder);
     builder.setInsertionPoint(ifPendingOp.thenYield());
@@ -608,6 +615,13 @@ LogicalResult ModuleLowering::lowerPendingSignalUpdates() {
         hw::ConstantOp::create(builder, loc, builder.getI1Type(), 1));
     auto ifApplyOp = scf::IfOp::create(builder, loc, noActiveChange, false);
     builder.setInsertionPoint(ifApplyOp.thenYield());
+    if (isElementwise) {
+      auto changed = signals::emitApplyPendingElements(builder, loc, storage);
+      auto ifChangedOp = scf::IfOp::create(builder, loc, changed, false);
+      builder.setInsertionPoint(ifChangedOp.thenYield());
+      requestDelta(builder, loc);
+      continue;
+    }
     auto oldValue = StateReadOp::create(builder, loc, storage.value);
     auto nextValue = StateReadOp::create(builder, loc, storage.next);
     Value newValue = nextValue;
@@ -634,17 +648,12 @@ LogicalResult ModuleLowering::lowerPendingSignalUpdates() {
 
 /// Get the types of the states that hold a signal's value and shadow storage,
 /// in the order of the fields of `SignalStorage`.
-static SmallVector<Type, 4> getSignalStorageTypes(llhd::RefType type) {
-  auto *context = type.getContext();
-  auto nestedType = type.getNestedType();
-  auto maskWidth = signals::getMaskWidth(nestedType);
-  return {StateType::get(nestedType), StateType::get(nestedType),
-          StateType::get(IntegerType::get(context, maskWidth)),
-          StateType::get(IntegerType::get(context, 64))};
+static SmallVector<Type, 6> getSignalStorageTypes(llhd::RefType type) {
+  return signals::getStorageTypes(type.getNestedType());
 }
 
 /// Lower the signal reference arguments of a coroutine. Each `!llhd.ref<T>`
-/// argument is expanded into four arguments holding the states of the signal's
+/// argument is expanded into arguments holding the states of the signal's
 /// value and shadow storage, and probes and drives of the signal in the body
 /// are lowered to reads and writes of these states.
 ///
@@ -697,14 +706,12 @@ ModuleLowering::lowerCoroutineSignals(CoroutineDefineOp defineOp) {
       auto oldArg = block->getArgument(pos);
       auto loc = oldArg.getLoc();
       auto types = getSignalStorageTypes(refType);
-      SignalStorage storage;
-      storage.value = block->insertArgument(pos + 1, types[0], loc);
-      storage.next = block->insertArgument(pos + 2, types[1], loc);
-      storage.mask = block->insertArgument(pos + 3, types[2], loc);
-      storage.time = block->insertArgument(pos + 4, types[3], loc);
-      expandedArgs[oldArg] = storage;
+      SmallVector<Value, 6> states;
+      for (auto [index, type] : llvm::enumerate(types))
+        states.push_back(block->insertArgument(pos + 1 + index, type, loc));
+      expandedArgs[oldArg] = SignalStorage::fromStates(states);
       oldArgs.push_back(oldArg);
-      pos += 5;
+      pos += 1 + types.size();
     }
   }
 
@@ -720,8 +727,7 @@ ModuleLowering::lowerCoroutineSignals(CoroutineDefineOp defineOp) {
       for (auto operand : succOperands.getForwardedOperands()) {
         newOperands.push_back(operand);
         if (auto it = expandedArgs.find(operand); it != expandedArgs.end())
-          newOperands.append({it->second.value, it->second.next,
-                              it->second.mask, it->second.time});
+          llvm::append_range(newOperands, it->second.getStates());
       }
       succOperands.getMutableForwardedOperands().assign(newOperands);
     }
@@ -1392,9 +1398,12 @@ LogicalResult OpLowering::lower(CoroutineInstanceOp op) {
       module.allocateSignalShadow(sigOp);
       auto &storage = module.getSignalStorage(sigOp);
       inputs.push_back(module.getSnapshot(storage.value));
-      signalSnapshots.push_back({storage.value, inputs.back()});
-      callArgs.append(
-          {storage.value, storage.next, storage.mask, storage.time});
+      // Comparing elementwise signals after every call would copy and compare
+      // the entire signal. Drives of such signals by the coroutine request a
+      // re-evaluation themselves, but are not marked as active changes.
+      if (!signals::isElementwise(sigOp.getType().getNestedType()))
+        signalSnapshots.push_back({storage.value, inputs.back()});
+      llvm::append_range(callArgs, storage.getStates());
       continue;
     }
     inputs.push_back(lowerValue(input, Phase::Old));
@@ -1910,10 +1919,23 @@ LogicalResult OpLowering::lower(llhd::ProbeOp op) {
     return success();
   }
 
+  // Elements of elementwise signals are read directly from the signal's
+  // storage, rather than taking a snapshot of the entire signal. Since drives
+  // in a module are deferred until the end of the evaluation, this still
+  // observes the value of the previous evaluation, unless a coroutine has
+  // changed the element in the meantime.
+  auto &storage = module.getSignalStorage(rootOp);
+  if (signals::isElementwise(rootOp.getType().getNestedType()) &&
+      !projections.empty() &&
+      isa<llhd::SigArrayGetOp>(projections.front().op)) {
+    module.loweredValues[{op.getResult(), phase}] = signals::emitProbe(
+        module.getBuilder(phase), op.getLoc(), storage, projections);
+    return success();
+  }
+
   // Outside of the initial and final phase, read the signal's value at the
   // beginning of the evaluation.
   Value value;
-  auto &storage = module.getSignalStorage(rootOp);
   if (phase == Phase::Initial || phase == Phase::Final)
     value = StateReadOp::create(module.getBuilder(phase), op.getLoc(),
                                 storage.value);

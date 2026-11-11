@@ -1224,3 +1224,38 @@ hw.module @CoroutineResultDrive(in %in: i42) {
   llhd.assign %s, %0 : i42
   hw.output
 }
+
+// Large arrays are stored elementwise. Elements are read and written
+// individually, and delayed drives track pending elements with a mask per
+// element and the range of elements that may have pending bits.
+// CHECK-LABEL: arc.model @ElementwiseSignal
+hw.module @ElementwiseSignal(in %idx: i10, in %v: i8) {
+  // CHECK:      [[S:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<!hw.array<1024xi8>>
+  // CHECK:      [[NEXT:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<!hw.array<1024xi8>>
+  // CHECK-NEXT: [[MASK:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<!hw.array<1024xi8>>
+  // CHECK-NEXT: [[TIME:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i64>
+  // CHECK-NEXT: [[LOW:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i64>
+  // CHECK-NEXT: [[HIGH:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i64>
+  %s = llhd.sig : <!hw.array<1024xi8>>
+  %e = llhd.sig.array_get %s[%idx] : <!hw.array<1024xi8>>
+  // CHECK: [[P:%.+]] = arc.state_read_element [[S]][{{%.+}}] : <!hw.array<1024xi8>>, i10 -> i8
+  // CHECK: func.call @ConsumeI8([[P]])
+  %p = llhd.prb %e : i8
+  func.call @ConsumeI8(%p) : (i8) -> ()
+  // CHECK: arc.state_write_element [[NEXT]][{{%.+}}] =
+  // CHECK: [[OLDMASK:%.+]] = arc.state_read_element [[MASK]][{{%.+}}]
+  // CHECK: [[NEWMASK:%.+]] = comb.or [[OLDMASK]], %c-1_i8 : i8
+  // CHECK: arc.state_write_element [[MASK]][{{%.+}}] = [[NEWMASK]]
+  // CHECK: arc.state_write [[LOW]]
+  // CHECK: arc.state_write [[HIGH]]
+  %t = llhd.constant_time <1ns, 0d>
+  llhd.drv %e, %v after %t : i8
+  // Pending updates are applied to the elements in the pending range.
+  // CHECK: [[RL:%.+]] = arc.state_read [[LOW]] : <i64>
+  // CHECK: [[RH:%.+]] = arc.state_read [[HIGH]] : <i64>
+  // CHECK: scf.for {{%.+}} = [[RL]] to [[RH]]
+  // CHECK:   arc.state_read_element [[MASK]]
+  // CHECK:   arc.state_write_element [[S]]
+  // CHECK:   arc.state_write_element [[MASK]]
+  hw.output
+}
