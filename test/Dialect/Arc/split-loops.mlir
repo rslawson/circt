@@ -237,3 +237,26 @@ arc.define @ClockedDpiArc(%arg0: i4, %arg1: i4) -> (i4, i4) {
   %1 = comb.mul %arg1, %arg0 : i4
   arc.output %0, %1 : i4, i4
 }
+
+// The results of coroutine instances only change when the coroutine runs.
+// Feeding them back into the coroutine is not a zero-latency loop.
+// CHECK-LABEL: hw.module @CoroutineFeedback
+// CHECK: [[X:%[0-9]+]] = arc.coroutine.instance @FeedbackCoroutine([[Y:%[0-9]+]])
+// CHECK: [[Y]] = arc.call @FeedbackArc([[X]])
+hw.module @CoroutineFeedback(out z: i4) {
+  %0 = arc.coroutine.instance @FeedbackCoroutine(%1) sensitive [true] : (i4) -> i4
+  %1 = arc.call @FeedbackArc(%0) : (i4) -> i4
+  hw.output %0 : i4
+}
+arc.define @FeedbackArc(%arg0: i4) -> i4 {
+  %c1_i4 = hw.constant 1 : i4
+  %0 = comb.add %arg0, %c1_i4 : i4
+  arc.output %0 : i4
+}
+arc.coroutine.define @FeedbackCoroutine(%arg0: i4) -> (i4, i1, i64) {
+  %mask = hw.constant 1 : i1
+  %never = hw.constant -1 : i64
+  arc.coroutine.yield (%arg0, %mask, %never : i4, i1, i64), ^bb1
+^bb1(%arg1: i4):
+  arc.coroutine.halt %arg1, %mask, %never : i4, i1, i64
+}
