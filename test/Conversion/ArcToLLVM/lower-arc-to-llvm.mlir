@@ -522,3 +522,12 @@ func.func @StateElements(%s: !arc.state<!hw.array<5xi8>>, %t: !arc.state<!hw.arr
   arc.state_write_element %t[%j] = %v : <!hw.array<4xi8>>, i2, i8
   return %0, %1 : i8, i8
 }
+
+// CHECK-LABEL: llvm.func @ReadMemoryFile
+// CHECK-SAME: (%[[NAME:[^:]*]]: !llvm.ptr, %[[MEM:[^:]*]]: !llvm.ptr
+func.func @ReadMemoryFile(%name: !sim.dstring, %mem: !arc.arrayref<4xi8>) {
+  // CHECK-NOT: llvm.alloca
+  // CHECK: llvm.call @arcRuntimeIR_readMem(%[[NAME]], %[[MEM]], {{.*}}) : (!llvm.ptr, !llvm.ptr, i64, i32, i32, i8, i8, i64, i64, i64) -> ()
+  arc.arrayref.read_memory_file %name, %mem {lowAddress = 0 : i64} : <4xi8>
+  return
+}

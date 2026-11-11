@@ -219,6 +219,26 @@ struct ConvertArrayInject : public OpConversionPattern<ArrayInjectOp> {
   }
 };
 
+/// Lower loading a memory from a file to an in-place update of a copy of the
+/// memory, instead of passing the memory by value.
+struct ConvertSVReadMem : public OpConversionPattern<sim::SVReadMemOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(sim::SVReadMemOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!isa<ArrayRefType>(adaptor.getMemory().getType()))
+      return failure();
+    Value dest = cloneArrayRef(adaptor.getMemory(), rewriter, op.getLoc());
+    ArrayRefReadMemoryFileOp::create(
+        rewriter, op.getLoc(), adaptor.getFilename(), dest, op.getIsBinary(),
+        op.getDimDescending()[0], op.getDimLows()[0], adaptor.getStartAddr(),
+        adaptor.getFinishAddr());
+    rewriter.replaceOp(op, dest);
+    return success();
+  }
+};
+
 struct ConvertArraySlice : public OpConversionPattern<ArraySliceOp> {
   using OpConversionPattern::OpConversionPattern;
 
@@ -438,8 +458,14 @@ void LowerArraysPass::runOnOperation() {
   });
 
   target.addLegalOp<ArrayRefFromArrayOp, ArrayRefToArrayOp>();
-  // Memories loaded from files are lowered from their array value.
-  target.addLegalOp<sim::SVReadMemOp>();
+  // Memories of integers loaded from files are updated in place. Other memories
+  // are lowered from their array value.
+  target.addDynamicallyLegalOp<sim::SVReadMemOp>([](sim::SVReadMemOp op) {
+    auto arrayType = dyn_cast<ArrayType>(op.getMemory().getType());
+    return !arrayType || !isa<IntegerType>(arrayType.getElementType()) ||
+           op.getDimLows().size() != 1 || op.getSliceLeft() ||
+           op.getEnumValues();
+  });
   // Arrays within structs or unions always use !hw.array.
   target.addLegalOp<StructCreateOp, StructInjectOp, StructExtractOp,
                     StructExplodeOp, UnionCreateOp, UnionExtractOp>();
@@ -502,14 +528,14 @@ void LowerArraysPass::runOnOperation() {
   cf::populateCFStructuralTypeConversionsAndLegality(converter, patterns,
                                                      target);
 
-  patterns
-      .add<ConvertFunc, ConvertReturn, ConvertCall, ConvertAggregateConstant,
-           ConvertArrayGet, ConvertArrayInject, ConvertArraySlice,
-           ConvertArrayConcat, ConvertArrayCreate, ConvertStorageGet,
-           ConvertMux, ConvertAllocState, ConvertStateRead, ConvertStateWrite,
-           ConvertStateReadElement, ConvertStateWriteElement, ConvertRootInput,
-           ConvertRootOutput, ConvertUnrealizedConversionCast>(converter,
-                                                               &getContext());
+  patterns.add<
+      ConvertFunc, ConvertReturn, ConvertCall, ConvertAggregateConstant,
+      ConvertArrayGet, ConvertArrayInject, ConvertArraySlice, ConvertSVReadMem,
+      ConvertArrayConcat, ConvertArrayCreate, ConvertStorageGet, ConvertMux,
+      ConvertAllocState, ConvertStateRead, ConvertStateWrite,
+      ConvertStateReadElement, ConvertStateWriteElement, ConvertRootInput,
+      ConvertRootOutput, ConvertUnrealizedConversionCast>(converter,
+                                                          &getContext());
 
   ConversionConfig config;
   config.allowPatternRollback = false;

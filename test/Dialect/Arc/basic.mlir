@@ -505,3 +505,10 @@ func.func @StateElements(%arg0: !arc.state<!hw.array<5xi8>>, %arg1: i3, %arg2: i
   arc.state_write_element %arg0[%arg1] = %arg2 : <!hw.array<5xi8>>, i3, i8
   return %0 : i8
 }
+
+// CHECK-LABEL: func.func @ReadMemoryFile
+func.func @ReadMemoryFile(%arg0: !sim.dstring, %arg1: !arc.arrayref<4xi8>, %arg2: i32) {
+  // CHECK: arc.arrayref.read_memory_file %arg0, %arg1 start = %arg2 {lowAddress = 0 : i64} : <4xi8>
+  arc.arrayref.read_memory_file %arg0, %arg1 start = %arg2 {lowAddress = 0 : i64} : <4xi8>
+  return
+}

@@ -1603,6 +1603,73 @@ struct StringChangeCaseOpLowering : public OpConversionPattern<SourceOp> {
   }
 };
 
+/// Emit a call of the runtime library loading the words of a memory of
+/// `numElements` integers of type `elementType`, located at `memory`, from a
+/// file.
+static LogicalResult
+emitReadMemCall(ConversionPatternRewriter &rewriter, Operation *op,
+                const TypeConverter *typeConverter, Value filename,
+                Value memory, IntegerType elementType, uint64_t numElements,
+                bool isBinary, bool descending, int64_t lowAddress,
+                Value startAddr, Value finishAddr) {
+  auto loc = op->getLoc();
+  auto *context = rewriter.getContext();
+  auto ptrType = LLVM::LLVMPointerType::get(context);
+  auto i8Type = rewriter.getI8Type();
+  auto i32Type = rewriter.getI32Type();
+  auto i64Type = rewriter.getI64Type();
+  auto func =
+      LLVM::lookupOrCreateFn(rewriter, op->getParentOfType<ModuleOp>(),
+                             runtime::APICallbacks::symNameReadMem,
+                             {ptrType, ptrType, i64Type, i32Type, i32Type,
+                              i8Type, i8Type, i64Type, i64Type, i64Type},
+                             LLVM::LLVMVoidType::get(context));
+  if (failed(func))
+    return failure();
+
+  // Compute the distance between consecutive words.
+  auto llvmArrayType = LLVM::LLVMArrayType::get(
+      typeConverter->convertType(elementType), numElements);
+  auto secondWord = LLVM::GEPOp::create(rewriter, loc, ptrType, llvmArrayType,
+                                        memory, ArrayRef<LLVM::GEPArg>{0, 1});
+  Value stride = LLVM::SubOp::create(
+      rewriter, loc,
+      LLVM::PtrToIntOp::create(rewriter, loc, i64Type, secondWord),
+      LLVM::PtrToIntOp::create(rewriter, loc, i64Type, memory));
+  stride = LLVM::TruncOp::create(rewriter, loc, i32Type, stride);
+
+  // Call the runtime library.
+  auto constI64 = [&](int64_t value) -> Value {
+    return LLVM::ConstantOp::create(rewriter, loc, i64Type,
+                                    rewriter.getI64IntegerAttr(value));
+  };
+  auto constI32 = [&](int32_t value) -> Value {
+    return LLVM::ConstantOp::create(rewriter, loc, i32Type,
+                                    rewriter.getI32IntegerAttr(value));
+  };
+  auto constI8 = [&](int8_t value) -> Value {
+    return LLVM::ConstantOp::create(rewriter, loc, i8Type,
+                                    rewriter.getI8IntegerAttr(value));
+  };
+  auto address = [&](Value addr) -> Value {
+    if (!addr)
+      return constI64(-1);
+    return LLVM::SExtOp::create(rewriter, loc, i64Type, addr);
+  };
+  SmallVector<Value> args{filename,
+                          memory,
+                          constI64(numElements),
+                          constI32(elementType.getWidth()),
+                          stride,
+                          constI8(isBinary),
+                          constI8(descending),
+                          constI64(lowAddress),
+                          address(startAddr),
+                          address(finishAddr)};
+  LLVM::CallOp::create(rewriter, loc, *func, args);
+  return success();
+}
+
 // Lowers `sim.sv.readmem` to a call of the runtime library, which updates a
 // copy of the memory on the stack.
 struct SVReadMemOpLowering : public OpConversionPattern<sim::SVReadMemOp> {
@@ -1618,68 +1685,46 @@ struct SVReadMemOpLowering : public OpConversionPattern<sim::SVReadMemOp> {
     if (op.getDimLows().size() != 1 || op.getSliceLeft() || op.getEnumValues())
       return rewriter.notifyMatchFailure(op, "unsupported memory");
 
-    auto *context = rewriter.getContext();
-    auto ptrType = LLVM::LLVMPointerType::get(context);
-    auto i8Type = rewriter.getI8Type();
-    auto i32Type = rewriter.getI32Type();
-    auto i64Type = rewriter.getI64Type();
-    auto func =
-        LLVM::lookupOrCreateFn(rewriter, op->getParentOfType<ModuleOp>(),
-                               runtime::APICallbacks::symNameReadMem,
-                               {ptrType, ptrType, i64Type, i32Type, i32Type,
-                                i8Type, i8Type, i64Type, i64Type, i64Type},
-                               LLVM::LLVMVoidType::get(context));
-    if (failed(func))
-      return failure();
-
-    // Spill the memory to the stack, and compute the distance between
-    // consecutive words.
+    // Spill the memory to the stack.
+    auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
     auto llvmArrayType = typeConverter->convertType(arrayType);
-    auto one = LLVM::ConstantOp::create(rewriter, loc, i32Type,
+    auto one = LLVM::ConstantOp::create(rewriter, loc, rewriter.getI32Type(),
                                         rewriter.getI32IntegerAttr(1));
     auto slot =
         LLVM::AllocaOp::create(rewriter, loc, ptrType, llvmArrayType, one);
     LLVM::StoreOp::create(rewriter, loc, adaptor.getMemory(), slot);
-    auto secondWord = LLVM::GEPOp::create(rewriter, loc, ptrType, llvmArrayType,
-                                          slot, ArrayRef<LLVM::GEPArg>{0, 1});
-    Value stride = LLVM::SubOp::create(
-        rewriter, loc,
-        LLVM::PtrToIntOp::create(rewriter, loc, i64Type, secondWord),
-        LLVM::PtrToIntOp::create(rewriter, loc, i64Type, slot));
-    stride = LLVM::TruncOp::create(rewriter, loc, i32Type, stride);
-
-    // Call the runtime library.
-    auto constI64 = [&](int64_t value) -> Value {
-      return LLVM::ConstantOp::create(rewriter, loc, i64Type,
-                                      rewriter.getI64IntegerAttr(value));
-    };
-    auto constI32 = [&](int32_t value) -> Value {
-      return LLVM::ConstantOp::create(rewriter, loc, i32Type,
-                                      rewriter.getI32IntegerAttr(value));
-    };
-    auto constI8 = [&](int8_t value) -> Value {
-      return LLVM::ConstantOp::create(rewriter, loc, i8Type,
-                                      rewriter.getI8IntegerAttr(value));
-    };
-    auto address = [&](Value addr) -> Value {
-      if (!addr)
-        return constI64(-1);
-      return LLVM::SExtOp::create(rewriter, loc, i64Type, addr);
-    };
-    SmallVector<Value> args{
-        adaptor.getFilename(),
-        slot,
-        constI64(arrayType.getNumElements()),
-        constI32(arrayType.getElementType().getIntOrFloatBitWidth()),
-        stride,
-        constI8(op.getIsBinary()),
-        constI8(op.getDimDescending()[0]),
-        constI64(op.getDimLows()[0]),
-        address(adaptor.getStartAddr()),
-        address(adaptor.getFinishAddr())};
-    LLVM::CallOp::create(rewriter, loc, *func, args);
-
+    if (failed(
+            emitReadMemCall(rewriter, op, typeConverter, adaptor.getFilename(),
+                            slot, cast<IntegerType>(arrayType.getElementType()),
+                            arrayType.getNumElements(), op.getIsBinary(),
+                            op.getDimDescending()[0], op.getDimLows()[0],
+                            adaptor.getStartAddr(), adaptor.getFinishAddr())))
+      return failure();
     rewriter.replaceOpWithNewOp<LLVM::LoadOp>(op, llvmArrayType, slot);
+    return success();
+  }
+};
+
+// Lowers `arc.arrayref.read_memory_file` to a call of the runtime library,
+// which updates the array in place.
+struct ArrayRefReadMemoryFileOpLowering
+    : public OpConversionPattern<arc::ArrayRefReadMemoryFileOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(arc::ArrayRefReadMemoryFileOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto arrayType = op.getMemory().getType();
+    auto elementType = dyn_cast<IntegerType>(arrayType.getElementType());
+    if (!elementType)
+      return rewriter.notifyMatchFailure(op, "only arrays of integers");
+    if (failed(emitReadMemCall(
+            rewriter, op, typeConverter, adaptor.getFilename(),
+            adaptor.getMemory(), elementType, arrayType.getNumElements(),
+            op.getIsBinary(), op.getDescending(), op.getLowAddress(),
+            adaptor.getStartAddr(), adaptor.getFinishAddr())))
+      return failure();
+    rewriter.eraseOp(op);
     return success();
   }
 };
@@ -2621,6 +2666,7 @@ void LowerArcToLLVMPass::runOnOperation() {
     DumpVarsOpLowering,
     SVFOpenOpLowering,
     SVReadMemOpLowering,
+    ArrayRefReadMemoryFileOpLowering,
     GetNextWakeupOpLowering,
     IsTerminatedOpLowering,
     IntToTimeOpLowering,

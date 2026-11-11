@@ -15,6 +15,7 @@ include "circt/Dialect/Arc/ArcInterfaces.td"
 include "circt/Dialect/Arc/ArcTypes.td"
 include "circt/Dialect/HW/HWTypes.td"
 include "circt/Dialect/Seq/SeqTypes.td"
+include "circt/Dialect/Sim/SimTypes.td"
 include "mlir/IR/EnumAttr.td"
 include "mlir/Interfaces/FunctionInterfaces.td"
 include "mlir/IR/OpAsmInterface.td"
@@ -1525,6 +1526,33 @@ def ArrayRefAllocOp : ArcOp<"arrayref.alloc", []> {
   let results = (outs ArrayRefType:$output);
   let assemblyFormat = "attr-dict (`init` `(` $init^ `)`)? `:` type($output)";
   let hasVerifier = 1;
+}
+
+def ArrayRefReadMemoryFileOp : ArcOp<"arrayref.read_memory_file", [
+  AttrSizedOperandSegments
+]> {
+  let summary = "Load the words of an array from a file";
+  let description = [{
+    Updates the words of an array in place with the data read from a file, as
+    with `sim.sv.readmem`. The array's elements are words of a memory whose
+    lowest address is `lowAddress`. If `descending` is set, the word at the
+    lowest address is stored first. Otherwise the word at the highest address
+    is stored first.
+  }];
+  let arguments = (ins
+    DynamicStringType:$filename,
+    Arg<ArrayRefType, "", [MemRead, MemWrite]>:$memory,
+    DefaultValuedAttr<BoolAttr, "false">:$isBinary,
+    DefaultValuedAttr<BoolAttr, "false">:$descending,
+    I64Attr:$lowAddress,
+    Optional<I32>:$startAddr,
+    Optional<I32>:$finishAddr
+  );
+  let assemblyFormat = [{
+    $filename `,` $memory
+    (`start` `=` $startAddr^)? (`finish` `=` $finishAddr^)?
+    attr-dict `:` type($memory)
+  }];
 }
 
 def ArrayRefGetOp : ArcOp<"arrayref.get", [
