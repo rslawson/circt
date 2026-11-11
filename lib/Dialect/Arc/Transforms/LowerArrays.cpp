@@ -477,6 +477,26 @@ void LowerArraysPass::runOnOperation() {
     return ArrayRefToArrayOp::create(b, loc, type, values.front());
   });
 
+  // States are pointers regardless of whether they hold arrays or array
+  // references. States nested in aggregates, such as the persisted state of a
+  // coroutine, keep their original type and are cast as needed.
+  auto castState = [](OpBuilder &b, StateType type, ValueRange values,
+                      Location loc) -> Value {
+    if (values.size() != 1 || !isa<StateType>(values.front().getType()))
+      return {};
+    return UnrealizedConversionCastOp::create(b, loc, type, values)
+        .getResult(0);
+  };
+  converter.addSourceMaterialization(castState);
+  converter.addTargetMaterialization(castState);
+  target.addDynamicallyLegalOp<UnrealizedConversionCastOp>(
+      [&](UnrealizedConversionCastOp op) {
+        auto isState = [](Type type) { return isa<StateType>(type); };
+        return converter.isLegal(op) ||
+               (llvm::all_of(op->getOperandTypes(), isState) &&
+                llvm::all_of(op->getResultTypes(), isState));
+      });
+
   // Functions may consist of multiple blocks, for example after coroutines
   // have been lowered. Convert the arrays passed between blocks.
   cf::populateCFStructuralTypeConversionsAndLegality(converter, patterns,

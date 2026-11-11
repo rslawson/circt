@@ -45,11 +45,32 @@ struct SignalStorage {
   /// The pending value of the signal. Null if not allocated.
   Value next;
   /// A bit mask of the pending bits in `next`. A non-zero mask indicates that a
-  /// pending value is scheduled. Null if not allocated.
+  /// pending value is scheduled. For elementwise signals, this is an array
+  /// holding a mask for each element. Null if not allocated.
   Value mask;
   /// The time at which the pending value takes effect. Null if not allocated.
   Value time;
+  /// For elementwise signals, the range `[low, high)` of elements that may
+  /// have pending bits, as `i64` states. The range is empty if `high` is zero.
+  /// Null if not allocated.
+  Value low;
+  Value high;
+
+  /// Get the non-null storage states, in the order of the fields.
+  SmallVector<Value, 6> getStates() const;
+  /// Create the storage from the states returned by `getStates`.
+  static SignalStorage fromStates(ValueRange states);
 };
+
+/// Check whether a signal of the given type is stored elementwise. This is
+/// the case for large arrays, such as memories, whose elements are read and
+/// written individually rather than copying the entire array, and whose
+/// pending updates are tracked per element.
+bool isElementwise(Type type);
+
+/// Get the types of the states holding a signal of the given type and its
+/// shadow storage, in the order of the fields of `SignalStorage`.
+SmallVector<Type, 6> getStorageTypes(Type type);
 
 /// Check whether an op is a projection from a reference into a part of it.
 bool isProjection(Operation *op);
@@ -100,11 +121,16 @@ bool isSupportedType(Type type);
 /// that the pending bits of a delayed drive are tracked with a single bit.
 bool isOpaque(Type type);
 
-/// Get the width of the mask tracking the pending bits of a signal.
-unsigned getMaskWidth(Type type);
+/// Get the type of the mask tracking the pending bits of a signal.
+Type getMaskType(Type type);
 
 /// Emit a check whether two values of a supported type differ.
 Value emitChanged(OpBuilder &builder, Location loc, Value lhs, Value rhs);
+
+/// Apply the pending bits of an elementwise signal to its value and clear
+/// them. Returns an `i1` indicating whether the value changed.
+Value emitApplyPendingElements(OpBuilder &builder, Location loc,
+                               const SignalStorage &storage);
 
 /// Convert a value to a flat integer of the same bit width.
 Value toBits(OpBuilder &builder, Location loc, Value value);
