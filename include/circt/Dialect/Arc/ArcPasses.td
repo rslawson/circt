@@ -191,7 +191,10 @@ def LowerProcessesPass : Pass<"arc-lower-processes", "mlir::ModuleOp"> {
   let description = [{
     Convert each `llhd.process` op into an `arc.coroutine.define` outside of the
     module, plus an `arc.coroutine.instance` inside the module where the process
-    used to be.
+    used to be. Convert each `llhd.coroutine` op into an `arc.coroutine.define`
+    of the same name, and expand each `llhd.call_coroutine` op into a loop that
+    calls the coroutine until it returns, suspending the caller whenever the
+    callee suspends.
   }];
   let dependentDialects = [
     "arc::ArcDialect",
@@ -199,6 +202,7 @@ def LowerProcessesPass : Pass<"arc-lower-processes", "mlir::ModuleOp"> {
     "hw::HWDialect",
     "llhd::LLHDDialect",
     "mlir::arith::ArithDialect",
+    "mlir::cf::ControlFlowDialect",
     "mlir::ub::UBDialect",
   ];
 }

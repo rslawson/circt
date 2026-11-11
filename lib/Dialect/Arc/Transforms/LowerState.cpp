@@ -710,6 +710,37 @@ ModuleLowering::lowerCoroutineSignals(CoroutineDefineOp defineOp) {
     op->erase();
   }
 
+  // Pass the states of signal arguments on to called coroutines, whose
+  // signal arguments are expanded in the same way.
+  SmallVector<CoroutineCallOp> callOps;
+  defineOp.walk([&](CoroutineCallOp callOp) { callOps.push_back(callOp); });
+  for (auto callOp : callOps) {
+    if (!llvm::any_of(callOp.getArgs().getTypes(),
+                      [](Type type) { return isa<llhd::RefType>(type); }))
+      continue;
+    auto calleeOp =
+        symbolTable.lookup<CoroutineDefineOp>(callOp.getCalleeAttr().getAttr());
+    if (!calleeOp)
+      return callOp.emitOpError() << "calls unknown coroutine";
+    if (failed(lowerCoroutineSignals(calleeOp)))
+      return failure();
+    SmallVector<Value> newArgs;
+    for (auto arg : callOp.getArgs()) {
+      if (!isa<llhd::RefType>(arg.getType())) {
+        newArgs.push_back(arg);
+        continue;
+      }
+      auto it = expandedArgs.find(arg);
+      if (it == expandedArgs.end())
+        return callOp.emitOpError()
+               << "passes unsupported signal reference to coroutine; only "
+                  "entire signals are supported";
+      newArgs.append({it->second.value, it->second.next, it->second.mask,
+                      it->second.time});
+    }
+    callOp.getArgsMutable().assign(newArgs);
+  }
+
   // Remove the projections, which should now be unused, and the old arguments.
   SmallVector<Operation *> projectionOps;
   defineOp.walk([&](Operation *op) {
