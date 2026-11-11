@@ -4223,7 +4223,23 @@ Value Context::convertSystemCall(
     auto op = moore::PlusArgsValueBIOp::create(
         builder, loc, foundTy, resultType,
         builder.getStringAttr(strLit->getValue()));
-    moore::BlockingAssignOp::create(builder, loc, lvalue, op.getResult());
+
+    // The variable is only modified if a matching plusarg was found. See IEEE
+    // 1800-2017 § 21.6 "Command line input".
+    auto oldValue = moore::ReadOp::create(builder, loc, lvalue);
+    auto conditionalOp =
+        moore::ConditionalOp::create(builder, loc, resultType, op.getFound());
+    {
+      OpBuilder::InsertionGuard guard(builder);
+      builder.setInsertionPointToStart(
+          &conditionalOp.getTrueRegion().emplaceBlock());
+      moore::YieldOp::create(builder, loc, op.getResult());
+      builder.setInsertionPointToStart(
+          &conditionalOp.getFalseRegion().emplaceBlock());
+      moore::YieldOp::create(builder, loc, oldValue);
+    }
+    moore::BlockingAssignOp::create(builder, loc, lvalue,
+                                    conditionalOp.getResult());
     return op.getFound();
   }
 
