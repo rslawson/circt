@@ -307,7 +307,8 @@ LogicalResult Converter::absorbRegs(HWModuleOp module) {
     Value reset;
     SmallVector<Value> initialValues;
     SmallVector<seq::CompRegOp> absorbedRegs;
-    SmallVector<Attribute> absorbedNames(callOp->getNumResults(), {});
+    SmallVector<Attribute> absorbedNames(
+        callOp->getNumResults(), StringAttr::get(module.getContext(), ""));
     if (auto names = callOp->getAttrOfType<ArrayAttr>("names"))
       absorbedNames.assign(names.getValue().begin(), names.getValue().end());
 
@@ -354,7 +355,8 @@ LogicalResult Converter::absorbRegs(HWModuleOp module) {
       // If we absorb a register into the arc, the arc effectively produces that
       // register's value. So if the register had a name, ensure that we assign
       // that name to the arc's output.
-      absorbedNames[result.getResultNumber()] = regOp.getNameAttr();
+      if (auto name = regOp.getNameAttr())
+        absorbedNames[result.getResultNumber()] = name;
     }
 
     // If this wasn't a trivial case keep the arc around for a second iteration.
@@ -465,7 +467,10 @@ LogicalResult Converter::absorbRegs(HWModuleOp module) {
         inputs.push_back(regOp.getInput());
         types.push_back(regOp.getType());
         outputs.push_back(block->addArgument(regOp.getType(), regOp.getLoc()));
-        names.push_back(regOp->getAttrOfType<StringAttr>("name"));
+        if (auto name = regOp.getNameAttr())
+          names.push_back(name);
+        else
+          names.push_back(builder.getStringAttr(""));
         if (failed(convertInitialValue(regOp, initialValues)))
           return failure();
       }
