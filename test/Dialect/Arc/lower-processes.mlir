@@ -700,3 +700,61 @@ hw.module @SignalCaptures(in %idx: i1) {
   }
   hw.output
 }
+
+//===----------------------------------------------------------------------===//
+// Coroutines are lowered to `arc.coroutine.define` ops of the same name. Their
+// waits yield zero values for the coroutine's results, and observe the
+// coroutine's arguments. Calls to coroutines are expanded into a loop that
+// suspends the caller whenever the callee suspends, mapping the callee's
+// observe bitmask onto the caller's arguments.
+
+// CHECK-LABEL: arc.coroutine.define private @waitEdges
+// CHECK-SAME: ([[CLK:%.+]]: !llhd.ref<i1>, [[N:%.+]]: i8) -> (i8, i2, i64)
+// CHECK:   llhd.prb [[CLK]]
+// CHECK:   [[ZERO:%.+]] = hw.constant 0 : i8
+// CHECK:   arc.coroutine.yield ([[ZERO]], {{%.+}}, {{%.+}} : i8, i2, i64), ^[[BB:.+]]
+// CHECK: ^[[BB]]({{%.+}}: !llhd.ref<i1>, [[N2:%.+]]: i8):
+// CHECK:   arc.coroutine.return [[N2]], {{%.+}}, {{%.+}} : i8, i2, i64
+llhd.coroutine private @waitEdges(%clk: !llhd.ref<i1>, %n: i8) -> i8 {
+  %p = llhd.prb %clk : i1
+  llhd.wait (%p : i1), ^bb1
+^bb1:
+  llhd.return %n : i8
+}
+
+// CHECK-LABEL: arc.coroutine.define @CoroutineCalls.llhd.process
+// CHECK-SAME: ([[CLK:%.+]]: !llhd.ref<i1>) -> (i8, i1, i64)
+// CHECK:   [[STATE0:%.+]] = arc.coroutine.undefined_state : <@waitEdges>
+// CHECK:   [[PC0:%.+]] = arc.coroutine.start_pc : <@waitEdges>
+// CHECK:   cf.br ^[[CALL:.+]]([[STATE0]], [[PC0]] :
+// CHECK: ^[[CALL]]([[STATE:%.+]]: !arc.coroutine_state<@waitEdges>, [[PC:%.+]]: !arc.coroutine_pc<@waitEdges>):
+// CHECK:   [[NEWSTATE:%.+]], [[NEWPC:%.+]], [[RES:%.+]]:3 = arc.coroutine.call @waitEdges([[STATE]], [[PC]], [[CLK]], {{%.+}})
+// CHECK:   [[ISRET:%.+]] = arc.coroutine.pc_is_return [[NEWPC]]
+// CHECK:   cf.cond_br [[ISRET]], ^[[CONT:.+]]([[RES]]#0 : i8), ^[[SUSP:.+]]
+// CHECK: ^[[SUSP]]:
+// CHECK:   [[ISHALT:%.+]] = arc.coroutine.pc_is_halt [[NEWPC]]
+// CHECK:   cf.cond_br [[ISHALT]], ^[[HALT:.+]], ^[[WAIT:.+]]
+// CHECK: ^[[HALT]]:
+// CHECK:   arc.coroutine.halt
+// CHECK: ^[[WAIT]]:
+// CHECK:   [[BIT:%.+]] = comb.extract [[RES]]#1 from 0 : (i2) -> i1
+// CHECK:   [[MASK:%.+]] = comb.concat [[BIT]] : i1
+// CHECK:   [[ZERO:%.+]] = hw.constant 0 : i8
+// CHECK:   arc.coroutine.yield ([[ZERO]], [[MASK]], [[RES]]#2 : i8, i1, i64), ^[[RESUME:.+]]([[NEWSTATE]], [[NEWPC]] :
+// CHECK: ^[[RESUME]]({{%.+}}: !llhd.ref<i1>, [[RSTATE:%.+]]: !arc.coroutine_state<@waitEdges>, [[RPC:%.+]]: !arc.coroutine_pc<@waitEdges>):
+// CHECK:   cf.br ^[[CALL]]([[RSTATE]], [[RPC]] :
+// CHECK: ^[[CONT]]([[R:%.+]]: i8):
+// CHECK:   arc.coroutine.halt [[R]], {{%.+}}, {{%.+}} : i8, i1, i64
+
+// CHECK-LABEL: hw.module @CoroutineCalls
+// CHECK: arc.coroutine.instance @CoroutineCalls.llhd.process({{%.+}}) sensitive [true]
+hw.module @CoroutineCalls(out x: i8) {
+  %false = hw.constant false
+  %c3 = hw.constant 3 : i8
+  %clk = llhd.sig %false : <i1>
+  %0 = llhd.process -> i8 {
+    %r = llhd.call_coroutine @waitEdges(%clk, %c3) : (!llhd.ref<i1>, i8) -> i8
+    llhd.halt %r : i8
+  }
+  hw.output %0 : i8
+}

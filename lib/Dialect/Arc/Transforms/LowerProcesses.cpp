@@ -54,6 +54,7 @@
 #include "circt/Dialect/Sim/SimOps.h"
 #include "mlir/Analysis/Liveness.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/IR/Dominance.h"
 #include "mlir/IR/SymbolTable.h"
@@ -78,26 +79,58 @@ using llvm::SmallDenseSet;
 
 namespace {
 
-/// Worker that lowers a single `llhd.process` op.
+/// Worker that lowers a single `llhd.process` or `llhd.coroutine` op.
 struct ProcessLowering {
-  ProcessLowering(llhd::ProcessOp processOp, SymbolTable &symbolTable)
-      : processOp(processOp), symbolTable(symbolTable) {}
+  ProcessLowering(Operation *op, SymbolTable &symbolTable)
+      : op(op), processOp(dyn_cast<llhd::ProcessOp>(op)),
+        llhdCoroutineOp(dyn_cast<llhd::CoroutineOp>(op)),
+        isCoroutine(llhdCoroutineOp), symbolTable(symbolTable) {
+    if (processOp)
+      llvm::append_range(resultTypes, processOp.getResultTypes());
+    else
+      llvm::append_range(resultTypes,
+                         llhdCoroutineOp.getFunctionType().getResults());
+  }
 
   LogicalResult run();
 
 private:
+  Region &getBody() { return op->getRegion(0); }
+  SmallVector<Value> createZeroResults(OpBuilder &builder, Location loc);
   void replaceUnreachables();
+  LogicalResult expandCoroutineCalls();
   void collectCaptures();
   void createCoroutine();
   void lowerSimulationOps();
   void addEntryAndResumeBlockArguments();
   LogicalResult rewriteTerminators();
+  void rewriteCallSuspensions();
   void renameCoroutineArgument(unsigned argIdx, Liveness &liveness,
                                DominanceInfo &dominance);
   void buildInstance();
 
+  /// The op being lowered, and the process or coroutine it is. The coroutine
+  /// op is erased once its body has been moved into `coroOp`.
+  Operation *op;
   llhd::ProcessOp processOp;
+  llhd::CoroutineOp llhdCoroutineOp;
+  bool isCoroutine;
   SymbolTable &symbolTable;
+
+  /// The results of the process or coroutine.
+  SmallVector<Type> resultTypes;
+
+  /// A suspension of the coroutine while a called coroutine is suspended. The
+  /// observe bitmask of the suspension is derived from the callee's bitmask.
+  struct CallSuspension {
+    /// The block to be terminated by the suspension.
+    Block *block;
+    /// The block at which execution resumes.
+    Block *resumeBlock;
+    /// The call of the suspended callee.
+    CoroutineCallOp callOp;
+  };
+  SmallVector<CallSuspension> callSuspensions;
 
   /// The coroutine created for this process. Populated by `createCoroutine`.
   CoroutineDefineOp coroOp;
@@ -153,21 +186,135 @@ static Value createZeroValue(OpBuilder &builder, Location loc, Type type) {
   return value;
 }
 
-/// Replace `ub.unreachable` terminators in the process body with `llhd.halt`
-/// ops that yield zero values. These terminators typically follow a
-/// `sim.terminate` op. Since `arc.terminate` only requests termination after
-/// the current evaluation, the coroutine has to suspend cleanly.
+/// Materialize zero values for all results of the process or coroutine.
+SmallVector<Value> ProcessLowering::createZeroResults(OpBuilder &builder,
+                                                      Location loc) {
+  SmallVector<Value> values;
+  for (auto type : resultTypes)
+    values.push_back(createZeroValue(builder, loc, type));
+  return values;
+}
+
+/// Replace `ub.unreachable` terminators in the body with `llhd.halt` ops that
+/// yield zero values. These terminators typically follow a `sim.terminate` op.
+/// Since `arc.terminate` only requests termination after the current
+/// evaluation, the coroutine has to suspend cleanly.
 void ProcessLowering::replaceUnreachables() {
   SmallVector<ub::UnreachableOp> unreachables;
-  processOp.walk([&](ub::UnreachableOp op) { unreachables.push_back(op); });
+  getBody().walk([&](ub::UnreachableOp op) { unreachables.push_back(op); });
   for (auto op : unreachables) {
     OpBuilder builder(op);
-    SmallVector<Value> yieldOperands;
-    for (auto type : processOp.getResultTypes())
-      yieldOperands.push_back(createZeroValue(builder, op.getLoc(), type));
-    llhd::HaltOp::create(builder, op.getLoc(), yieldOperands);
+    llhd::HaltOp::create(builder, op.getLoc(),
+                         createZeroResults(builder, op.getLoc()));
     op.erase();
   }
+}
+
+/// Compute the type of the `arc.coroutine.define` an `llhd.coroutine` is
+/// lowered to. The results are extended with an observe bitmask with one bit
+/// per argument, and the next wakeup time.
+static FunctionType getArcCoroutineType(FunctionType type) {
+  auto *context = type.getContext();
+  SmallVector<Type> resultTypes(type.getResults());
+  resultTypes.push_back(IntegerType::get(context, type.getNumInputs()));
+  resultTypes.push_back(IntegerType::get(context, 64));
+  return FunctionType::get(context, type.getInputs(), resultTypes);
+}
+
+/// Expand each `llhd.call_coroutine` op into a loop that repeatedly calls the
+/// coroutine until it returns. Whenever the callee suspends, the caller
+/// suspends as well and resumes the callee upon re-entry. If the callee halts,
+/// the caller halts as well.
+///
+/// The suspensions are only created once the body has been moved into the
+/// coroutine and its arguments are known, by `rewriteCallSuspensions`.
+LogicalResult ProcessLowering::expandCoroutineCalls() {
+  SmallVector<llhd::CallCoroutineOp> callOps;
+  getBody().walk([&](llhd::CallCoroutineOp op) { callOps.push_back(op); });
+
+  for (auto callOp : callOps) {
+    auto loc = callOp.getLoc();
+    auto *context = callOp.getContext();
+    auto calleeAttr = callOp.getCalleeAttr();
+
+    // Determine the type of the callee once it is lowered to an Arc coroutine.
+    FunctionType calleeType;
+    auto *calleeOp = symbolTable.lookup(calleeAttr.getAttr());
+    if (auto coroOp = dyn_cast_or_null<llhd::CoroutineOp>(calleeOp))
+      calleeType = getArcCoroutineType(coroOp.getFunctionType());
+    else if (auto defineOp = dyn_cast_or_null<CoroutineDefineOp>(calleeOp))
+      calleeType = defineOp.getFunctionType();
+    else
+      return callOp.emitOpError() << "calls unknown coroutine " << calleeAttr;
+    auto stateType = CoroutineStateType::get(context, calleeAttr);
+    auto pcType = CoroutinePCType::get(context, calleeAttr);
+
+    // Split the block at the call. The call's results become arguments of the
+    // continuation block.
+    auto *beforeBlock = callOp->getBlock();
+    auto *contBlock = beforeBlock->splitBlock(std::next(callOp->getIterator()));
+    for (auto result : callOp.getResults())
+      result.replaceAllUsesWith(contBlock->addArgument(result.getType(), loc));
+
+    // Create the blocks of the call loop.
+    auto *region = beforeBlock->getParent();
+    auto *callBlock = new Block();
+    auto *suspendBlock = new Block();
+    auto *haltBlock = new Block();
+    auto *waitBlock = new Block();
+    auto *resumeBlock = new Block();
+    region->getBlocks().insertAfter(beforeBlock->getIterator(), callBlock);
+    region->getBlocks().insertAfter(callBlock->getIterator(), suspendBlock);
+    region->getBlocks().insertAfter(suspendBlock->getIterator(), haltBlock);
+    region->getBlocks().insertAfter(haltBlock->getIterator(), waitBlock);
+    region->getBlocks().insertAfter(waitBlock->getIterator(), resumeBlock);
+    auto state = callBlock->addArgument(stateType, loc);
+    auto pc = callBlock->addArgument(pcType, loc);
+    auto resumeState = resumeBlock->addArgument(stateType, loc);
+    auto resumePC = resumeBlock->addArgument(pcType, loc);
+
+    // Start the callee with an undefined state.
+    auto builder = OpBuilder::atBlockEnd(beforeBlock);
+    auto initState = CoroutineUndefinedStateOp::create(builder, loc, stateType);
+    auto initPC = CoroutineStartPCOp::create(builder, loc, pcType);
+    cf::BranchOp::create(builder, loc, callBlock,
+                         ValueRange{initState, initPC});
+
+    // Call the coroutine, and continue if it returned.
+    builder.setInsertionPointToEnd(callBlock);
+    SmallVector<Type> callResultTypes{stateType, pcType};
+    llvm::append_range(callResultTypes, calleeType.getResults());
+    auto newCallOp =
+        CoroutineCallOp::create(builder, loc, callResultTypes, calleeAttr,
+                                state, pc, callOp.getOperands());
+    auto newPC = newCallOp.getResult(1);
+    auto isReturn = CoroutinePCIsReturnOp::create(builder, loc, newPC);
+    // Note that `getResults()` only covers the values returned by the callee,
+    // excluding the state and program counter.
+    auto results = newCallOp.getResults().take_front(callOp.getNumResults());
+    cf::CondBranchOp::create(builder, loc, isReturn, contBlock, results,
+                             suspendBlock, ValueRange{});
+
+    // Halt if the callee halted, and suspend otherwise.
+    builder.setInsertionPointToEnd(suspendBlock);
+    auto isHalt = CoroutinePCIsHaltOp::create(builder, loc, newPC);
+    cf::CondBranchOp::create(builder, loc, isHalt, haltBlock, ValueRange{},
+                             waitBlock, ValueRange{});
+    builder.setInsertionPointToEnd(haltBlock);
+    llhd::HaltOp::create(builder, loc, createZeroResults(builder, loc));
+
+    // The suspension in the wait block is created later. Terminate the block
+    // with a placeholder until then. Upon resumption, call the coroutine again
+    // with its new state.
+    builder.setInsertionPointToEnd(waitBlock);
+    ub::UnreachableOp::create(builder, loc);
+    builder.setInsertionPointToEnd(resumeBlock);
+    cf::BranchOp::create(builder, loc, callBlock,
+                         ValueRange{resumeState, resumePC});
+    callSuspensions.push_back({waitBlock, resumeBlock, newCallOp});
+    callOp.erase();
+  }
+  return success();
 }
 
 void ProcessLowering::collectCaptures() {
@@ -218,6 +365,26 @@ void ProcessLowering::collectCaptures() {
 }
 
 void ProcessLowering::createCoroutine() {
+  // An `llhd.coroutine` is replaced with an `arc.coroutine.define` of the same
+  // name.
+  if (llhdCoroutineOp) {
+    OpBuilder builder(llhdCoroutineOp);
+    auto name = llhdCoroutineOp.getSymNameAttr();
+    auto type = getArcCoroutineType(llhdCoroutineOp.getFunctionType());
+    symbolTable.remove(llhdCoroutineOp);
+    coroOp = CoroutineDefineOp::create(builder, llhdCoroutineOp.getLoc(), name,
+                                       TypeAttr::get(type));
+    coroOp.setSymVisibilityAttr(llhdCoroutineOp.getSymVisibilityAttr());
+    symbolTable.insert(coroOp);
+    coroOp.getBody().takeBody(llhdCoroutineOp.getBody());
+    llhdCoroutineOp.erase();
+    llhdCoroutineOp = {};
+    op = coroOp;
+    builder.setInsertionPointToStart(&coroOp.getBody().front());
+    inferredContext = InferredContextOp::create(builder, coroOp.getLoc());
+    return;
+  }
+
   // Find the parent module and use it as the insertion anchor.
   auto hwModule = processOp->getParentOfType<hw::HWModuleOp>();
   assert(hwModule);
@@ -232,10 +399,10 @@ void ProcessLowering::createCoroutine() {
   for (auto cap : captures)
     argTypes.push_back(cap.getType());
   auto maskType = builder.getIntegerType(argTypes.size());
-  SmallVector<Type> resultTypes(processOp.getResultTypes());
-  resultTypes.push_back(maskType);
-  resultTypes.push_back(i64Type);
-  auto funcType = builder.getFunctionType(argTypes, resultTypes);
+  SmallVector<Type> funcResultTypes(resultTypes);
+  funcResultTypes.push_back(maskType);
+  funcResultTypes.push_back(i64Type);
+  auto funcType = builder.getFunctionType(argTypes, funcResultTypes);
 
   // Pick a symbol name based on the parent hw.module's name. Insertion into
   // the symbol table uniquifies the name.
@@ -300,24 +467,31 @@ void ProcessLowering::lowerSimulationOps() {
 /// runs every reference is to an internal SSA value defined at the entry.
 void ProcessLowering::addEntryAndResumeBlockArguments() {
   auto &body = coroOp.getBody();
-  auto loc = processOp.getLoc();
+  auto loc = op->getLoc();
 
   // Assemble the initial resume block argument types that will be provided by
   // callers entering or re-entering the coroutine.
-  auto prefixTypes = TypeRange(captures);
+  auto prefixTypes = coroOp.getArgumentTypes();
 
   // Add arguments to the entry block, recording each one's coroutine argument
-  // index so `rewriteTerminators` can map observed values to bitmask bits.
+  // index so `rewriteTerminators` can map observed values to bitmask bits. The
+  // entry block of a lowered `llhd.coroutine` already has these arguments.
   auto &entry = body.front();
   for (auto [index, type] : llvm::enumerate(prefixTypes)) {
-    entryArgs.push_back(entry.insertArgument(index, type, loc));
+    if (isCoroutine)
+      entryArgs.push_back(entry.getArgument(index));
+    else
+      entryArgs.push_back(entry.insertArgument(index, type, loc));
     argIndices[entryArgs.back()] = index;
   }
 
-  // Collect the resume blocks, which are targets of `llhd.wait` ops.
+  // Collect the resume blocks, which are targets of `llhd.wait` ops and of the
+  // suspensions in coroutine calls.
   for (auto &block : body)
     if (auto wait = dyn_cast<llhd::WaitOp>(block.getTerminator()))
       resumeBlocks.insert(wait.getDest());
+  for (auto &suspension : callSuspensions)
+    resumeBlocks.insert(suspension.resumeBlock);
 
   // Pre-add prefix args to each resume block, then extend non-wait predecessor
   // branches with placeholder operands so the destination operand counts keep
@@ -333,7 +507,7 @@ void ProcessLowering::addEntryAndResumeBlockArguments() {
     // its operand count already matches.
     for (auto *pred : resumeBlock->getPredecessors()) {
       auto *term = pred->getTerminator();
-      if (isa<llhd::WaitOp>(term))
+      if (isa<llhd::WaitOp, CoroutineYieldOp>(term))
         continue;
       auto branchOp = cast<BranchOpInterface>(term);
       for (unsigned succIdx = 0, succNum = term->getNumSuccessors();
@@ -399,13 +573,19 @@ LogicalResult ProcessLowering::rewriteTerminators() {
       }
       auto mask = hw::ConstantOp::create(builder, loc, maskBits);
 
+      // Waits in a coroutine do not yield any values. Yield zeros for the
+      // coroutine's results instead.
+      SmallVector<Value> waitYieldOperands(wait.getYieldOperands());
+      if (isCoroutine)
+        waitYieldOperands = createZeroResults(builder, loc);
+
       // A wait without a delay never resumes on time; use the sentinel `-1` as
       // its wakeup. It is only a real suspension if it observes something --
       // otherwise it can never resume and is treated as a halt.
       if (!wait.getDelay()) {
         auto never =
             hw::ConstantOp::create(builder, loc, APInt::getAllOnes(64));
-        SmallVector<Value> yieldOperands(wait.getYieldOperands());
+        SmallVector<Value> yieldOperands(waitYieldOperands);
         yieldOperands.push_back(mask);
         yieldOperands.push_back(never);
         if (wait.getObserved().empty())
@@ -420,7 +600,7 @@ LogicalResult ProcessLowering::rewriteTerminators() {
       auto now = CurrentTimeOp::create(builder, loc, inferredContext);
       auto delay = llhd::TimeToIntOp::create(builder, loc, wait.getDelay());
       auto wakeup = comb::AddOp::create(builder, loc, now, delay);
-      SmallVector<Value> yieldOperands(wait.getYieldOperands());
+      SmallVector<Value> yieldOperands(waitYieldOperands);
       yieldOperands.push_back(mask);
       yieldOperands.push_back(wakeup);
       CoroutineYieldOp::create(builder, loc, yieldOperands,
@@ -429,20 +609,91 @@ LogicalResult ProcessLowering::rewriteTerminators() {
       continue;
     }
 
-    // Handle `llhd.halt` ops.
+    // Handle `llhd.halt` ops. Halts in a coroutine do not yield any values.
+    // Yield zeros for the coroutine's results instead.
     if (auto halt = dyn_cast<llhd::HaltOp>(term)) {
       auto mask = hw::ConstantOp::create(builder, loc, APInt(maskWidth, 0));
       auto never = hw::ConstantOp::create(builder, loc, APInt::getAllOnes(64));
       SmallVector<Value> yieldOperands(halt.getYieldOperands());
+      if (yieldOperands.size() != resultTypes.size())
+        yieldOperands = createZeroResults(builder, loc);
       yieldOperands.push_back(mask);
       yieldOperands.push_back(never);
       CoroutineHaltOp::create(builder, loc, yieldOperands);
       halt.erase();
       continue;
     }
+
+    // Handle `llhd.return` ops in coroutines.
+    if (auto ret = dyn_cast<llhd::ReturnOp>(term)) {
+      auto mask = hw::ConstantOp::create(builder, loc, APInt(maskWidth, 0));
+      auto never = hw::ConstantOp::create(builder, loc, APInt::getAllOnes(64));
+      SmallVector<Value> yieldOperands(ret.getOperands());
+      yieldOperands.push_back(mask);
+      yieldOperands.push_back(never);
+      CoroutineReturnOp::create(builder, loc, yieldOperands);
+      ret.erase();
+      continue;
+    }
   }
 
+  rewriteCallSuspensions();
   return success();
+}
+
+/// Create the suspensions of the coroutine while a called coroutine is
+/// suspended. The coroutine resumes at the same time as the callee. The callee
+/// observes changes of its arguments, which are translated to the coroutine's
+/// own arguments: if a signal passed to the callee is derived from a signal
+/// argument of the coroutine, a change of that argument resumes the coroutine.
+/// Since the callee re-checks the conditions it waits for upon resumption,
+/// resuming due to a change of a different part of the same signal is
+/// harmless.
+void ProcessLowering::rewriteCallSuspensions() {
+  auto maskWidth = entryArgs.size();
+  for (auto &suspension : callSuspensions) {
+    auto callOp = suspension.callOp;
+    auto loc = callOp.getLoc();
+    suspension.block->getTerminator()->erase();
+    auto builder = OpBuilder::atBlockEnd(suspension.block);
+
+    // Map the bits of the callee's observe bitmask to the coroutine's bits. The
+    // callee's last two results are the observe bitmask and the wakeup time.
+    auto calleeMask = callOp.getResults().drop_back().back();
+    SmallVector<Value> bits(maskWidth);
+    for (auto [calleeIndex, arg] : llvm::enumerate(callOp.getArgs())) {
+      if (!isa<llhd::RefType>(arg.getType()))
+        continue;
+      SmallVector<signals::Projection> projections;
+      auto it = argIndices.find(signals::getRootRef(arg, projections));
+      if (it == argIndices.end())
+        continue;
+      Value bit =
+          comb::ExtractOp::create(builder, loc, calleeMask, calleeIndex, 1);
+      auto &slot = bits[it->second];
+      slot = slot ? comb::OrOp::create(builder, loc, slot, bit) : bit;
+      staticSensitivityMask[it->second] = true;
+    }
+    Value mask;
+    if (maskWidth == 0) {
+      mask = hw::ConstantOp::create(builder, loc, builder.getIntegerType(0), 0);
+    } else {
+      SmallVector<Value> concatBits;
+      for (auto bit : llvm::reverse(bits))
+        concatBits.push_back(
+            bit ? bit
+                : hw::ConstantOp::create(builder, loc, builder.getI1Type(), 0));
+      mask = comb::ConcatOp::create(builder, loc, concatBits);
+    }
+
+    auto yieldOperands = createZeroResults(builder, loc);
+    yieldOperands.push_back(mask);
+    yieldOperands.push_back(callOp.getResults().back());
+    CoroutineYieldOp::create(
+        builder, loc, yieldOperands,
+        ValueRange{callOp.getResult(0), callOp.getResult(1)},
+        suspension.resumeBlock);
+  }
 }
 
 /// SSA-rename uses of the coroutine's `argIdx`-th entry-block argument so
@@ -556,7 +807,10 @@ void ProcessLowering::buildInstance() {
 
 LogicalResult ProcessLowering::run() {
   replaceUnreachables();
-  collectCaptures();
+  if (failed(expandCoroutineCalls()))
+    return failure();
+  if (processOp)
+    collectCaptures();
   createCoroutine();
   lowerSimulationOps();
   addEntryAndResumeBlockArguments();
@@ -582,7 +836,8 @@ LogicalResult ProcessLowering::run() {
     }
   }
 
-  buildInstance();
+  if (processOp)
+    buildInstance();
   return success();
 }
 
@@ -601,12 +856,15 @@ void LowerProcessesPass::runOnOperation() {
   auto module = getOperation();
   auto &symbolTable = getAnalysis<SymbolTable>();
 
-  bool anyFailed = false;
-  module.walk([&](llhd::ProcessOp op) {
-    ProcessLowering lowering(op, symbolTable);
-    if (failed(lowering.run()))
-      anyFailed = true;
+  SmallVector<Operation *> ops;
+  module.walk([&](Operation *op) {
+    if (isa<llhd::ProcessOp, llhd::CoroutineOp>(op))
+      ops.push_back(op);
   });
+  bool anyFailed = false;
+  for (auto *op : ops)
+    if (failed(ProcessLowering(op, symbolTable).run()))
+      anyFailed = true;
   if (anyFailed)
     signalPassFailure();
 }
