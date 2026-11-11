@@ -66,11 +66,13 @@ TraceBuffer TraceEncoder::getBuffer() {
 void TraceEncoder::run(ArcState *state) {
   if (worker.has_value() || !initialize(state))
     return;
-  // Flush the trace buffer which may contain data from the init function
+  // Flush the trace buffer which may contain data from the init function.
+  // Tracing may start at a later point of the simulation than its beginning.
   state->traceBufferSize = 0;
   timeStep = 0;
+  simTime = readTimeFromState(state);
   activeBuffer.firstStep = 0;
-  activeBuffer.firstSimTime = 0;
+  activeBuffer.firstSimTime = simTime;
   assert(activeBuffer.stepMarkers.empty());
   assert(bufferQueue.empty());
   // Start the worker thread
