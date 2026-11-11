@@ -99,6 +99,24 @@ struct FmtDescriptor {
     return d;
   }
 
+  /// Creates a dynamic string descriptor.
+  ///
+  /// isLeftAligned: Whether the string is left aligned.
+  /// specifierWidth: The minumum width of the output in characters.
+  /// paddingChar: The character used to pad the string to `specifierWidth`.
+  ///
+  /// The string will be passed as a variadic argument (const char*), which may
+  /// be null to indicate an empty string.
+  static FmtDescriptor createString(bool isLeftAligned, int32_t specifierWidth,
+                                    char paddingChar) {
+    FmtDescriptor d;
+    d.action = Action_String;
+    d.stringFmt.specifierWidth = specifierWidth;
+    d.stringFmt.paddingChar = paddingChar;
+    d.stringFmt.isLeftAligned = isLeftAligned;
+    return d;
+  }
+
   /// The action to take for this descriptor.
   ///
   /// We use uint64_t to ensure that the descriptor is always 16 bytes in size
@@ -114,6 +132,8 @@ struct FmtDescriptor {
     Action_Int,
     /// Prints a character (%c).
     Action_Char,
+    /// Prints a dynamic string (%s).
+    Action_String,
   };
   Action action;
 
@@ -142,6 +162,16 @@ struct FmtDescriptor {
     int64_t width;
   };
 
+  /// Dynamic string formatting options.
+  struct StringFmt {
+    /// The minumum width of the output in characters.
+    int32_t specifierWidth;
+    /// Padding character.
+    char paddingChar;
+    /// Whether the string is left aligned.
+    bool isLeftAligned;
+  };
+
   /// Literal string (small string optimization).
   struct SmallLiteral {
     /// NUL-terminated string.
@@ -152,6 +182,7 @@ struct FmtDescriptor {
     LiteralFmt literal;
     IntFmt intFmt;
     SmallLiteral smallLiteral;
+    StringFmt stringFmt;
   };
 };
 

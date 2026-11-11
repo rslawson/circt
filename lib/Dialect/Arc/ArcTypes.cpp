@@ -10,6 +10,7 @@
 #include "circt/Dialect/Arc/ArcDialect.h"
 #include "circt/Dialect/HW/HWTypes.h"
 #include "circt/Dialect/Seq/SeqTypes.h"
+#include "circt/Dialect/Sim/SimTypes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -39,9 +40,9 @@ std::optional<uint64_t> circt::arc::computeLLVMBitWidth(Type type) {
   if (auto floatType = dyn_cast<FloatType>(type))
     return floatType.getWidth();
 
-  // States, memories, and storage are lowered to pointers. Arcilator only
-  // supports 64 bit targets.
-  if (isa<StateType, MemoryType, StorageType>(type))
+  // States, memories, storage, and dynamic strings are lowered to pointers.
+  // Arcilator only supports 64 bit targets.
+  if (isa<StateType, MemoryType, StorageType, sim::DynamicStringType>(type))
     return 64;
 
   auto computeForArrayType = [&](auto arrayType) -> std::optional<uint64_t> {

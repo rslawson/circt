@@ -362,9 +362,9 @@ func.func @PlusArgs() -> (i1, i1, i42) {
   // CHECK: %[[TEST:.*]] = llvm.call @arcRuntimeIR_testPlusArgs(%[[PREFIX]]) : (!llvm.ptr) -> i8
   // CHECK: %[[FOUND1:.*]] = llvm.icmp "ne" %[[TEST]], %{{.*}} : i8
   %0 = sim.plusargs.test "foo"
+  // CHECK: %[[FMT:.*]] = llvm.mlir.addressof @{{.*}} : !llvm.ptr
   // CHECK: %[[SLOT:.*]] = llvm.alloca %{{.*}} x i64 : (i32) -> !llvm.ptr
   // CHECK: llvm.store %{{.*}}, %[[SLOT]] : i64, !llvm.ptr
-  // CHECK: %[[FMT:.*]] = llvm.mlir.addressof @{{.*}} : !llvm.ptr
   // CHECK: %[[BITS:.*]] = llvm.mlir.constant(42 : i32) : i32
   // CHECK: %[[VAL:.*]] = llvm.call @arcRuntimeIR_valuePlusArgs(%[[FMT]], %[[SLOT]], %[[BITS]]) : (!llvm.ptr, !llvm.ptr, i32) -> i8
   // CHECK: %[[FOUND2:.*]] = llvm.icmp "ne" %[[VAL]], %{{.*}} : i8
@@ -441,5 +441,47 @@ func.func @test_failure_eval(%state: !arc.storage, %cond: i1) {
   // CHECK-NEXT: llvm.store %[[VAL_FAIL]], %[[GEP_FAIL]] : i8, !llvm.ptr
   // CHECK-NEXT: llvm.return
   arc.terminate %ctx, false
+  return
+}
+
+// CHECK-LABEL: llvm.func @Strings
+// CHECK-SAME: (%[[A:.*]]: !llvm.ptr, %[[B:.*]]: !llvm.ptr, %[[I:.*]]: i32, %[[X:.*]]: i16)
+func.func @Strings(%a: !sim.dstring, %b: !sim.dstring, %i: i32, %x: i16) {
+  // CHECK: %[[CAT0:.*]] = llvm.call @arcRuntimeIR_stringConcat(%[[A]], %[[B]]) : (!llvm.ptr, !llvm.ptr) -> !llvm.ptr
+  // CHECK: %[[CAT1:.*]] = llvm.call @arcRuntimeIR_stringConcat(%[[CAT0]], %[[A]]) : (!llvm.ptr, !llvm.ptr) -> !llvm.ptr
+  %0 = sim.string.concat (%a, %b, %a)
+  // CHECK: llvm.call @arcRuntimeIR_stringLength(%[[CAT1]]) : (!llvm.ptr) -> i32
+  %1 = sim.string.length %0
+  // CHECK: %[[CMP:.*]] = llvm.call @arcRuntimeIR_stringCompare(%[[A]], %[[B]]) : (!llvm.ptr, !llvm.ptr) -> i32
+  // CHECK: llvm.icmp "slt" %[[CMP]], %{{.*}} : i32
+  %2 = sim.string.cmp lt %a, %b : !sim.dstring
+  // CHECK: llvm.call @arcRuntimeIR_stringCompare(%[[A]], %[[B]]) : (!llvm.ptr, !llvm.ptr) -> i32
+  %3 = sim.string.compare %a, %b
+  // CHECK: llvm.call @arcRuntimeIR_stringGet(%[[A]], %[[I]]) : (!llvm.ptr, i32) -> i8
+  %4 = sim.string.get %a[%i]
+  // CHECK: %[[END:.*]] = llvm.mlir.constant(2147483647 : i32) : i32
+  // CHECK: llvm.call @arcRuntimeIR_stringSubstr(%[[A]], %[[I]], %[[END]]) : (!llvm.ptr, i32, i32) -> !llvm.ptr
+  %5 = sim.string.substr %a[%i]
+  // CHECK: %[[UPPER:.*]] = llvm.mlir.constant(1 : i8) : i8
+  // CHECK: llvm.call @arcRuntimeIR_stringChangeCase(%[[A]], %[[UPPER]]) : (!llvm.ptr, i8) -> !llvm.ptr
+  %6 = sim.string.toupper %a
+  // CHECK: %[[SLOT:.*]] = llvm.alloca
+  // CHECK: %[[BITS:.*]] = llvm.mlir.constant(16 : i32) : i32
+  // CHECK: llvm.call @arcRuntimeIR_stringFromInt(%[[SLOT]], %[[BITS]]) : (!llvm.ptr, i32) -> !llvm.ptr
+  %7 = sim.string.int_to_string %x : i16
+  // CHECK: %[[SLOT:.*]] = llvm.alloca %{{.*}} x i64
+  // CHECK: llvm.call @arcRuntimeIR_stringToInt(%[[A]], %[[SLOT]], %{{.*}}) : (!llvm.ptr, !llvm.ptr, i32) -> ()
+  // CHECK: %[[WORDS:.*]] = llvm.load %[[SLOT]] : !llvm.ptr -> i64
+  // CHECK: llvm.trunc %[[WORDS]] : i64 to i16
+  %8 = sim.string.string_to_int %a : i16
+  // CHECK: llvm.call @arcRuntimeIR_stringFormat(%{{.*}}, %[[A]]) vararg(!llvm.func<ptr (ptr, ...)>) : (!llvm.ptr, !llvm.ptr) -> !llvm.ptr
+  %f = sim.fmt.string %a specifierWidth 4 : !sim.dstring
+  %9 = sim.string.format_to_string %f
+  // CHECK: %[[FMT:.*]] = llvm.mlir.addressof
+  // CHECK: %[[SLOT:.*]] = llvm.alloca %{{.*}} x !llvm.ptr
+  // CHECK: llvm.store %{{.*}}, %[[SLOT]] : !llvm.ptr, !llvm.ptr
+  // CHECK: llvm.call @arcRuntimeIR_valuePlusArgsString(%{{.*}}, %[[SLOT]]) : (!llvm.ptr, !llvm.ptr) -> i8
+  // CHECK: llvm.load %[[SLOT]] : !llvm.ptr -> !llvm.ptr
+  %10, %11 = sim.plusargs.value "name=%s" : !sim.dstring
   return
 }

@@ -43,6 +43,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 using namespace circt::arc::runtime;
@@ -147,6 +148,18 @@ static void formatToStream(llvm::raw_ostream &os, const FmtDescriptor *fmt,
     case FmtDescriptor::Action_Char:
       os << static_cast<char>(va_arg(args, int));
       break;
+    case FmtDescriptor::Action_String: {
+      const char *str = va_arg(args, const char *);
+      llvm::StringRef s = str ? llvm::StringRef(str) : llvm::StringRef();
+      int32_t padding = std::max<int32_t>(
+          fmt->stringFmt.specifierWidth - static_cast<int32_t>(s.size()), 0);
+      if (!fmt->stringFmt.isLeftAligned)
+        os << std::string(padding, fmt->stringFmt.paddingChar);
+      os << s;
+      if (fmt->stringFmt.isLeftAligned)
+        os << std::string(padding, fmt->stringFmt.paddingChar);
+      break;
+    }
     case FmtDescriptor::Action_End:
       break;
     }
@@ -299,6 +312,106 @@ uint8_t arcRuntimeIR_valuePlusArgs(const char *format, uint64_t *value,
   for (unsigned i = 0, e = llvm::divideCeil(numBits, 64); i < e; ++i)
     value[i] = result.extractBitsAsZExtValue(
         std::min(64u, result.getBitWidth() - i * 64), i * 64);
+  return 1;
+}
+
+// --- Dynamic Strings ---
+
+/// Return a stable, interned copy of the given string.
+static const char *internString(llvm::StringRef str) {
+  static std::unordered_set<std::string> strings;
+  return strings.emplace(str).first->c_str();
+}
+
+/// Return a view of a dynamic string, which may be null.
+static llvm::StringRef getString(const char *str) {
+  return str ? llvm::StringRef(str) : llvm::StringRef();
+}
+
+const char *arcRuntimeIR_stringIntern(const char *str) {
+  return internString(getString(str));
+}
+
+const char *arcRuntimeIR_stringFormat(const FmtDescriptor *fmt, ...) {
+  std::string result;
+  llvm::raw_string_ostream os(result);
+  va_list args;
+  va_start(args, fmt);
+  formatToStream(os, fmt, args);
+  va_end(args);
+  return internString(result);
+}
+
+const char *arcRuntimeIR_stringConcat(const char *lhs, const char *rhs) {
+  return internString((getString(lhs) + getString(rhs)).str());
+}
+
+int32_t arcRuntimeIR_stringLength(const char *str) {
+  return getString(str).size();
+}
+
+int32_t arcRuntimeIR_stringCompare(const char *lhs, const char *rhs) {
+  return getString(lhs).compare(getString(rhs));
+}
+
+const char *arcRuntimeIR_stringFromInt(const uint64_t *value,
+                                       uint32_t numBits) {
+  if (numBits == 0)
+    return internString("");
+  unsigned numBytes = llvm::divideCeil(numBits, 8);
+  llvm::APInt bits(numBits,
+                   llvm::ArrayRef(value, llvm::divideCeil(numBits, 64)));
+  bits = bits.zext(numBytes * 8);
+  std::string result;
+  for (unsigned i = numBytes; i > 0; --i)
+    if (auto c = static_cast<char>(bits.extractBitsAsZExtValue(8, (i - 1) * 8)))
+      result.push_back(c);
+  return internString(result);
+}
+
+void arcRuntimeIR_stringToInt(const char *str, uint64_t *value,
+                              uint32_t numBits) {
+  llvm::APInt result(std::max(numBits, 1u), 0);
+  for (char c : getString(str)) {
+    result <<= 8;
+    result |= llvm::APInt(result.getBitWidth(), static_cast<uint8_t>(c));
+  }
+  for (unsigned i = 0, e = llvm::divideCeil(numBits, 64); i < e; ++i)
+    value[i] = result.extractBitsAsZExtValue(
+        std::min(64u, result.getBitWidth() - i * 64), i * 64);
+}
+
+uint8_t arcRuntimeIR_stringGet(const char *str, int32_t index) {
+  auto s = getString(str);
+  if (index < 0 || static_cast<size_t>(index) >= s.size())
+    return 0;
+  return s[index];
+}
+
+const char *arcRuntimeIR_stringSubstr(const char *str, int32_t start,
+                                      int32_t end) {
+  auto s = getString(str);
+  size_t clampedStart = std::max<int32_t>(start, 0);
+  size_t clampedEnd = std::max<int32_t>(end, 0);
+  if (clampedEnd <= clampedStart)
+    return internString("");
+  return internString(s.slice(clampedStart, clampedEnd));
+}
+
+const char *arcRuntimeIR_stringChangeCase(const char *str, uint8_t upper) {
+  return internString(upper ? getString(str).upper() : getString(str).lower());
+}
+
+uint8_t arcRuntimeIR_valuePlusArgsString(const char *format,
+                                         const char **value) {
+  llvm::StringRef formatRef(format);
+  auto percent = formatRef.find('%');
+  if (percent == llvm::StringRef::npos)
+    return 0;
+  auto arg = findPlusArg(formatRef.take_front(percent));
+  if (!arg)
+    return 0;
+  *value = internString(*arg);
   return 1;
 }
 
@@ -511,17 +624,36 @@ void arcRuntimeIR_dumpVars(uint8_t *modelState) {
 #ifdef ARC_RUNTIME_JIT_BIND
 namespace circt::arc::runtime {
 
-static const APICallbacks apiCallbacksGlobal{
-    &arcRuntimeIR_allocInstance,   &arcRuntimeIR_deleteInstance,
-    &arcRuntimeIR_onEval,          &arcRuntimeIR_onInitialized,
-    &arcRuntimeIR_format,          &arcRuntimeIR_formatToStream,
-    &arcRuntimeIR_getStdoutStream, &arcRuntimeIR_getStderrStream,
-    &arcRuntimeIR_swapTraceBuffer, &arcRuntimeIR_dumpFile,
-    &arcRuntimeIR_dumpVars,        &arcRuntimeIR_testPlusArgs,
-    &arcRuntimeIR_valuePlusArgs,   &arcRuntimeIR_readMem,
-    &arcRuntimeIR_fopen,           &arcRuntimeIR_fclose,
-    &arcRuntimeIR_getFileStream,   &arcRuntimeIR_flushStream,
-    &arcRuntimeIR_flushAll};
+static const APICallbacks apiCallbacksGlobal{&arcRuntimeIR_allocInstance,
+                                             &arcRuntimeIR_deleteInstance,
+                                             &arcRuntimeIR_onEval,
+                                             &arcRuntimeIR_onInitialized,
+                                             &arcRuntimeIR_format,
+                                             &arcRuntimeIR_formatToStream,
+                                             &arcRuntimeIR_getStdoutStream,
+                                             &arcRuntimeIR_getStderrStream,
+                                             &arcRuntimeIR_swapTraceBuffer,
+                                             &arcRuntimeIR_dumpFile,
+                                             &arcRuntimeIR_dumpVars,
+                                             &arcRuntimeIR_testPlusArgs,
+                                             &arcRuntimeIR_valuePlusArgs,
+                                             &arcRuntimeIR_readMem,
+                                             &arcRuntimeIR_fopen,
+                                             &arcRuntimeIR_fclose,
+                                             &arcRuntimeIR_getFileStream,
+                                             &arcRuntimeIR_flushStream,
+                                             &arcRuntimeIR_flushAll,
+                                             &arcRuntimeIR_stringIntern,
+                                             &arcRuntimeIR_stringFormat,
+                                             &arcRuntimeIR_stringConcat,
+                                             &arcRuntimeIR_stringLength,
+                                             &arcRuntimeIR_stringCompare,
+                                             &arcRuntimeIR_stringFromInt,
+                                             &arcRuntimeIR_stringToInt,
+                                             &arcRuntimeIR_stringGet,
+                                             &arcRuntimeIR_stringSubstr,
+                                             &arcRuntimeIR_stringChangeCase,
+                                             &arcRuntimeIR_valuePlusArgsString};
 
 const APICallbacks &getArcRuntimeAPICallbacks() { return apiCallbacksGlobal; }
 

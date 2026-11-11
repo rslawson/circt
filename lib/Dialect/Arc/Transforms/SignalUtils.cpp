@@ -11,6 +11,7 @@
 #include "circt/Dialect/Comb/CombOps.h"
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/LLHD/LLHDOps.h"
+#include "circt/Dialect/Sim/SimOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -217,6 +218,28 @@ bool signals::hasBitRepresentation(Type type) {
   return hw::getBitWidth(type) >= 0;
 }
 
+bool signals::isSupportedType(Type type) {
+  return hasBitRepresentation(type) || isa<sim::DynamicStringType>(type);
+}
+
+bool signals::isOpaque(Type type) {
+  return isa<FloatType, sim::DynamicStringType>(type);
+}
+
+unsigned signals::getMaskWidth(Type type) {
+  return isOpaque(type) ? 1 : hw::getBitWidth(type);
+}
+
+Value signals::emitChanged(OpBuilder &builder, Location loc, Value lhs,
+                           Value rhs) {
+  if (isa<sim::DynamicStringType>(lhs.getType()))
+    return sim::StringCmpOp::create(builder, loc, sim::StringCmpPredicate::ne,
+                                    lhs, rhs);
+  return comb::ICmpOp::create(builder, loc, comb::ICmpPredicate::ne,
+                              toBits(builder, loc, lhs),
+                              toBits(builder, loc, rhs));
+}
+
 Value signals::toBits(OpBuilder &builder, Location loc, Value value) {
   auto type = value.getType();
   if (isa<IntegerType>(type))
@@ -266,9 +289,7 @@ void signals::emitDrive(OpBuilder &builder, Location loc, Value arcContext,
     auto oldPart = project(builder, loc, oldValue, projections);
     auto newValue = inject(builder, loc, oldValue, projections, value);
     StateWriteOp::create(builder, loc, storage.value, newValue);
-    auto changed = comb::ICmpOp::create(builder, loc, comb::ICmpPredicate::ne,
-                                        toBits(builder, loc, oldPart),
-                                        toBits(builder, loc, value));
+    auto changed = emitChanged(builder, loc, oldPart, value);
     auto ifChangedOp = scf::IfOp::create(builder, loc, changed, false);
     OpBuilder::InsertionGuard guard(builder);
     builder.setInsertionPoint(ifChangedOp.thenYield());
@@ -290,7 +311,7 @@ void signals::emitDrive(OpBuilder &builder, Location loc, Value arcContext,
   // Mark the driven bits as pending.
   Value partMask;
   auto maskType = cast<StateType>(storage.mask.getType()).getType();
-  if (isa<FloatType>(type)) {
+  if (isOpaque(type)) {
     partMask = hw::ConstantOp::create(builder, loc, maskType, 1);
   } else {
     auto zeros = fromBits(
