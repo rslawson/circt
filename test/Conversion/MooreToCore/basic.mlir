@@ -1804,28 +1804,32 @@ func.func @SimulationControl() {
 func.func @SeverityToPrint() {
   // CHECK: [[MSG:%.*]] = sim.fmt.literal "Fatal condition met!"
   // CHECK-NEXT: [[PFX:%.*]] = sim.fmt.literal "Fatal: "
-  // CHECK-NEXT: [[CONCAT:%.*]] = sim.fmt.concat ([[PFX]], [[MSG]])
+  // CHECK-NEXT: [[NL:%.*]] = sim.fmt.literal "\0A"
+  // CHECK-NEXT: [[CONCAT:%.*]] = sim.fmt.concat ([[PFX]], [[MSG]], [[NL]])
   // CHECK-NEXT: sim.proc.print [[CONCAT]]
   %0 = moore.fmt.literal "Fatal condition met!"
   moore.builtin.severity fatal %0
 
   // CHECK: [[MSG:%.*]] = sim.fmt.literal "Error condition met!"
   // CHECK-NEXT: [[PFX:%.*]] = sim.fmt.literal "Error: "
-  // CHECK-NEXT: [[CONCAT:%.*]] = sim.fmt.concat ([[PFX]], [[MSG]])
+  // CHECK-NEXT: [[NL:%.*]] = sim.fmt.literal "\0A"
+  // CHECK-NEXT: [[CONCAT:%.*]] = sim.fmt.concat ([[PFX]], [[MSG]], [[NL]])
   // CHECK-NEXT: sim.proc.print [[CONCAT]]
   %1 = moore.fmt.literal "Error condition met!"
   moore.builtin.severity error %1
 
   // CHECK: [[MSG:%.*]] = sim.fmt.literal "Warning condition met!"
   // CHECK-NEXT: [[PFX:%.*]] = sim.fmt.literal "Warning: "
-  // CHECK-NEXT: [[CONCAT:%.*]] = sim.fmt.concat ([[PFX]], [[MSG]])
+  // CHECK-NEXT: [[NL:%.*]] = sim.fmt.literal "\0A"
+  // CHECK-NEXT: [[CONCAT:%.*]] = sim.fmt.concat ([[PFX]], [[MSG]], [[NL]])
   // CHECK-NEXT: sim.proc.print [[CONCAT]]
   %2 = moore.fmt.literal "Warning condition met!"
   moore.builtin.severity warning %2
 
   // CHECK: [[MSG:%.*]] = sim.fmt.literal "Info condition met!"
   // CHECK-NEXT: [[PFX:%.*]] = sim.fmt.literal "Info: "
-  // CHECK-NEXT: [[CONCAT:%.*]] = sim.fmt.concat ([[PFX]], [[MSG]])
+  // CHECK-NEXT: [[NL:%.*]] = sim.fmt.literal "\0A"
+  // CHECK-NEXT: [[CONCAT:%.*]] = sim.fmt.concat ([[PFX]], [[MSG]], [[NL]])
   // CHECK-NEXT: sim.proc.print [[CONCAT]]
   %3 = moore.fmt.literal "Info condition met!"
   moore.builtin.severity info %3

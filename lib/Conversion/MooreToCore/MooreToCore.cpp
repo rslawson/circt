@@ -3780,10 +3780,13 @@ static LogicalResult convert(SeverityBIOp op, SeverityBIOp::Adaptor adaptor,
     break;
   }
 
+  // Severity tasks print their message like `$display`, which includes a
+  // trailing newline. See IEEE 1800-2023 § 20.10 "Severity tasks".
   auto prefix =
       sim::FormatLiteralOp::create(rewriter, op.getLoc(), severityString);
+  auto newline = sim::FormatLiteralOp::create(rewriter, op.getLoc(), "\n");
   auto message = sim::FormatStringConcatOp::create(
-      rewriter, op.getLoc(), ValueRange{prefix, adaptor.getMessage()});
+      rewriter, op.getLoc(), ValueRange{prefix, adaptor.getMessage(), newline});
   rewriter.replaceOpWithNewOp<sim::PrintFormattedProcOp>(op, message);
   return success();
 }
