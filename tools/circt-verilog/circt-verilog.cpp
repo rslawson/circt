@@ -144,6 +144,12 @@ struct CLOptions {
       cl::desc("Interpret `always @(*)` as `always_comb`"), cl::init(true),
       cl::cat(cat)};
 
+  cl::opt<bool> lowerAlwaysAtSignalsAsComb{
+      "always-at-signals-as-comb",
+      cl::desc("Interpret `always @(a, b, ...)` without edges as "
+               "`always_comb`, as done by Verilator"),
+      cl::init(false), cl::cat(cat)};
+
   cl::opt<bool> detectMemories{
       "detect-memories",
       cl::desc("Detect memories and lower them to `seq.firmem`"),
@@ -372,6 +378,7 @@ static LogicalResult executeWithSources(MLIRContext *context,
     options.mode = ImportVerilogOptions::Mode::OnlyImport;
   options.debugInfo = opts.debugInfo;
   options.lowerAlwaysAtStarAsComb = opts.lowerAlwaysAtStarAsComb;
+  options.lowerAlwaysAtSignalsAsComb = opts.lowerAlwaysAtSignalsAsComb;
 
   options.includeDirs = opts.includeDirs;
   options.includeSystemDirs = opts.includeSystemDirs;

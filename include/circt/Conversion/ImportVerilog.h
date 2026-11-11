@@ -59,6 +59,11 @@ struct ImportVerilogOptions {
   /// Interpret `always @(*)` as `always_comb`.
   bool lowerAlwaysAtStarAsComb = true;
 
+  /// Interpret `always @(a, b, ...)` with an explicit sensitivity list without
+  /// edges as `always_comb`. Such blocks then also execute at time zero, as in
+  /// simulators like Verilator that treat them as combinational logic.
+  bool lowerAlwaysAtSignalsAsComb = false;
+
   //===--------------------------------------------------------------------===//
   // Include paths
   //===--------------------------------------------------------------------===//

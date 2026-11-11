@@ -249,6 +249,33 @@ struct PackageVisitor : public BaseVisitor {
 // Module Conversion
 //===----------------------------------------------------------------------===//
 
+/// Check whether a timing control is an event control on signals without any
+/// edges or `iff` conditions, such as `@(a or b)`.
+static bool isEdgelessEventControl(const slang::ast::TimingControl &ctrl) {
+  if (auto *signal = ctrl.as_if<slang::ast::SignalEventControl>())
+    return signal->edge == slang::ast::EdgeKind::None && !signal->iffCondition;
+  if (auto *list = ctrl.as_if<slang::ast::EventListControl>())
+    return llvm::all_of(list->events, [](auto *event) {
+      return isEdgelessEventControl(*event);
+    });
+  return false;
+}
+
+/// Check whether a statement contains any timing control or wait.
+static bool hasTimingControl(const slang::ast::Statement &stmt) {
+  bool found = false;
+  stmt.visit(slang::ast::makeVisitor(
+      [&](auto &visitor, const slang::ast::TimedStatement &) { found = true; },
+      [&](auto &visitor, const slang::ast::WaitStatement &) { found = true; },
+      [&](auto &visitor, const slang::ast::WaitForkStatement &) {
+        found = true;
+      },
+      [&](auto &visitor, const slang::ast::WaitOrderStatement &) {
+        found = true;
+      }));
+  return found;
+}
+
 static moore::ProcedureKind
 convertProcedureKind(slang::ast::ProceduralBlockKind kind) {
   switch (kind) {
@@ -916,6 +943,16 @@ struct ModuleVisitor : public BaseVisitor {
       if (procNode.procedureKind == slang::ast::ProceduralBlockKind::Always &&
           stmt &&
           stmt->timing.kind == slang::ast::TimingControlKind::ImplicitEvent)
+        return convertProcedure(moore::ProcedureKind::AlwaysComb, stmt->stmt);
+    }
+
+    // Detect `always @(a, b, ...) <stmt>` without edges and convert it to
+    // `always_comb <stmt>` if requested by the user.
+    if (context.options.lowerAlwaysAtSignalsAsComb &&
+        procNode.procedureKind == slang::ast::ProceduralBlockKind::Always) {
+      auto *stmt = procNode.getBody().as_if<slang::ast::TimedStatement>();
+      if (stmt && isEdgelessEventControl(stmt->timing) &&
+          !hasTimingControl(stmt->stmt))
         return convertProcedure(moore::ProcedureKind::AlwaysComb, stmt->stmt);
     }
 
