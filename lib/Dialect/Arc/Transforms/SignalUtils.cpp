@@ -219,11 +219,20 @@ bool signals::hasBitRepresentation(Type type) {
 }
 
 bool signals::isSupportedType(Type type) {
-  return hasBitRepresentation(type) || isa<sim::DynamicStringType>(type);
+  if (hasBitRepresentation(type) || isa<sim::DynamicStringType>(type))
+    return true;
+  // Structs containing values without a bit representation, such as strings,
+  // are compared field by field.
+  if (auto structType = dyn_cast<hw::StructType>(type))
+    return llvm::all_of(structType.getElements(), [](auto &field) {
+      return isSupportedType(field.type);
+    });
+  return false;
 }
 
 bool signals::isOpaque(Type type) {
-  return isa<FloatType, sim::DynamicStringType>(type);
+  return isa<FloatType, sim::DynamicStringType>(type) ||
+         !hasBitRepresentation(type);
 }
 
 /// Arrays wider than this many bits are compared and stored elementwise,
@@ -319,6 +328,23 @@ Value signals::emitChanged(OpBuilder &builder, Location loc, Value lhs,
   if (isa<sim::DynamicStringType>(lhs.getType()))
     return sim::StringCmpOp::create(builder, loc, sim::StringCmpPredicate::ne,
                                     lhs, rhs);
+  // Compare structs without a bit representation field by field.
+  if (auto structType = dyn_cast<hw::StructType>(lhs.getType());
+      structType && !hasBitRepresentation(structType)) {
+    Value changed;
+    for (auto &field : structType.getElements()) {
+      auto fieldChanged = emitChanged(
+          builder, loc,
+          hw::StructExtractOp::create(builder, loc, lhs, field.name),
+          hw::StructExtractOp::create(builder, loc, rhs, field.name));
+      changed = changed
+                    ? comb::OrOp::create(builder, loc, changed, fieldChanged)
+                    : fieldChanged;
+    }
+    if (!changed)
+      changed = hw::ConstantOp::create(builder, loc, builder.getI1Type(), 0);
+    return changed;
+  }
   // Compare large arrays elementwise in a loop, rather than as huge integers.
   if (isLargeArray(lhs.getType())) {
     auto arrayType = cast<hw::ArrayType>(lhs.getType());
@@ -522,8 +548,18 @@ void signals::emitDrive(OpBuilder &builder, Location loc, Value arcContext,
   }
 
   // Otherwise update the signal's shadow storage, which will be applied once
-  // the delay has elapsed.
-  auto oldNext = StateReadOp::create(builder, loc, storage.next);
+  // the delay has elapsed. Opaque signals are updated as a whole, so a drive
+  // of a part of them starts from the current value if no update is pending.
+  Value oldNext = StateReadOp::create(builder, loc, storage.next);
+  if (isOpaque(type) && !projections.empty()) {
+    auto mask = StateReadOp::create(builder, loc, storage.mask);
+    auto noPending = comb::ICmpOp::create(
+        builder, loc, comb::ICmpPredicate::eq, mask,
+        hw::ConstantOp::create(builder, loc, mask.getType(), 0));
+    oldNext = comb::MuxOp::create(
+        builder, loc, noPending,
+        StateReadOp::create(builder, loc, storage.value), oldNext);
+  }
   auto newNext = inject(builder, loc, oldNext, projections, value);
   StateWriteOp::create(builder, loc, storage.next, newNext);
 
