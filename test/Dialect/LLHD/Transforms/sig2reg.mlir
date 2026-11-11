@@ -160,3 +160,38 @@ hw.module @PromoteDelayedDrive(in %b : i42, out o : i42) {
   // CHECK: hw.output [[DLY]]
   hw.output %p : i42
 }
+
+// The process observes the initial value of the signal before driving it. The
+// signal cannot be replaced with the process result.
+// CHECK-LABEL: hw.module @SkipProcessObservingSignal
+hw.module @SkipProcessObservingSignal(in %a : i42, in %en : i1, out o : i42) {
+  // CHECK: [[SIG:%.+]] = llhd.sig
+  // CHECK: [[PRB:%.+]] = llhd.prb [[SIG]]
+  // CHECK: llhd.process
+  // CHECK: comb.mux %en, %a, [[PRB]]
+  // CHECK: llhd.assign [[SIG]]
+  %c = hw.constant -1 : i42
+  %x = llhd.sig %c : <i42>
+  %p = llhd.prb %x : i42
+  %r = llhd.process -> i42 {
+    %v = comb.mux %en, %a, %p : i42
+    llhd.halt %v : i42
+  }
+  llhd.assign %x, %r : i42
+  hw.output %p : i42
+}
+
+// Registers hold their own value, such that they may depend on the signal.
+// CHECK-LABEL: hw.module @PromoteRegisterObservingSignal
+hw.module @PromoteRegisterObservingSignal(in %clk : !seq.clock, in %a : i42, in %en : i1, out o : i42) {
+  // CHECK-NOT: llhd.sig
+  // CHECK: [[MUX:%.+]] = comb.mux %en, %a, [[REG:%.+]] : i42
+  // CHECK: [[REG]] = seq.firreg [[MUX]] clock %clk
+  // CHECK: hw.output [[REG]]
+  %x = llhd.sig %a : <i42>
+  %p = llhd.prb %x : i42
+  %v = comb.mux %en, %a, %p : i42
+  %r = seq.firreg %v clock %clk : i42
+  llhd.assign %x, %r : i42
+  hw.output %p : i42
+}

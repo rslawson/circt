@@ -14,6 +14,7 @@
 #include "circt/Dialect/LLHD/LLHDOps.h"
 #include "circt/Dialect/LLHD/LLHDPasses.h"
 #include "mlir/IR/Matchers.h"
+#include "mlir/Transforms/RegionUtils.h"
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "llhd-sig2reg"
@@ -45,6 +46,38 @@ void Sig2RegPass::runOnOperation() {
   for (auto op : signalsToErase)
     op.erase();
   signalsToErase.clear();
+}
+
+/// Check whether `value` depends on a probe of `signal` through a process. The
+/// results of a process only become defined once it runs, at which point it
+/// may have observed the signal's previous value, such as its initial value.
+/// Replacing the probe with the process result would lose that value.
+static bool dependsOnProbeThroughProcess(Value value, SignalOp signal) {
+  SmallVector<std::pair<Value, bool>> worklist{{value, false}};
+  DenseSet<Value> seen[2];
+  SetVector<Value> usedAbove;
+  while (!worklist.empty()) {
+    auto [value, throughProcess] = worklist.pop_back_val();
+    if (!seen[throughProcess].insert(value).second)
+      continue;
+    auto *defOp = value.getDefiningOp();
+    if (!defOp || defOp->getBlock() != signal->getBlock())
+      continue;
+    if (auto probeOp = dyn_cast<ProbeOp>(defOp)) {
+      if (throughProcess && probeOp.getSignal() == signal)
+        return true;
+      continue;
+    }
+    if (isa<ProcessOp>(defOp)) {
+      usedAbove.clear();
+      getUsedValuesDefinedAbove(defOp->getRegions(), usedAbove);
+      for (auto used : usedAbove)
+        worklist.push_back({used, true});
+    }
+    for (auto operand : defOp->getOperands())
+      worklist.push_back({operand, throughProcess});
+  }
+  return false;
 }
 
 void Sig2RegPass::promote(SignalOp op) {
@@ -102,6 +135,14 @@ void Sig2RegPass::promote(SignalOp op) {
   // We can't promote conditional drives.
   if (drive && drive.getEnable()) {
     LLVM_DEBUG(llvm::dbgs() << "- Skipping " << op << " (conditional drive)\n");
+    ++numSkipped;
+    return;
+  }
+
+  // We can't promote signals driven by a process that observes the signal.
+  if (drive && dependsOnProbeThroughProcess(drive.getValue(), op)) {
+    LLVM_DEBUG(llvm::dbgs() << "- Skipping " << op
+                            << " (driven by process observing signal)\n");
     ++numSkipped;
     return;
   }
