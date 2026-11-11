@@ -205,6 +205,9 @@ struct Deseq {
   Deseq(ProcessOp process) : process(process) {}
   LogicalResult deseq();
 
+  /// Whether the process has been replaced with registers.
+  bool converted = false;
+
   bool analyzeProcess();
   Value tracePastValue(Value pastValue);
 
@@ -349,6 +352,7 @@ LogicalResult Deseq::deseq() {
   // At this point the process has been replaced with specialized versions of it
   // for the different triggers and can be removed.
   process.erase();
+  converted = true;
   return success();
 }
 
@@ -1788,11 +1792,105 @@ struct DeseqPass : public llhd::impl::DeseqPassBase<DeseqPass> {
 };
 } // namespace
 
+/// Collect the side effects of a process that can be separated from the values
+/// the process computes. These are side-effecting ops, such as prints or
+/// termination of the simulation, whose results are only used by other
+/// separable side effects. Returns false if the process has side effects that
+/// cannot be separated.
+static bool collectSeparableSideEffects(ProcessOp process,
+                                        SmallPtrSetImpl<Operation *> &ops) {
+  // Visit the ops in reverse order, such that users are visited before the ops
+  // defining their operands within a block. Iterate until no more ops are
+  // added, to account for uses across blocks.
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (auto &block : llvm::reverse(process.getBody())) {
+      for (auto &op : llvm::reverse(block)) {
+        if (ops.contains(&op) || isMemoryEffectFree(&op) ||
+            op.getNumRegions() > 0 || op.hasTrait<OpTrait::IsTerminator>() ||
+            isa<WaitOp, HaltOp, DriveLikeOp>(op))
+          continue;
+        if (!llvm::all_of(op.getUsers(),
+                          [&](Operation *user) { return ops.contains(user); }))
+          continue;
+        ops.insert(&op);
+        changed = true;
+      }
+    }
+  }
+
+  // Ensure that there are no other side effects.
+  auto result = process.getBody().walk([&](Operation *op) {
+    if (isa<WaitOp, HaltOp>(op) || isMemoryEffectFree(op) || ops.contains(op))
+      return WalkResult::advance();
+    return WalkResult::interrupt();
+  });
+  return !result.wasInterrupted();
+}
+
+/// Desequentialize a process whose side effects are separable from the values
+/// it computes. Processes describing clocked logic often also contain prints,
+/// for example to report failed assertions. Desequentialize a copy of the
+/// process without these side effects. If that succeeds, the original process
+/// is kept for its side effects only, without producing any values.
+static LogicalResult deseqWithSideEffects(ProcessOp process) {
+  // Create a copy of the process without side effects, which takes over the
+  // uses of the original process.
+  OpBuilder builder(process);
+  auto copy = cast<ProcessOp>(builder.clone(*process));
+  SmallPtrSet<Operation *, 8> sideEffects;
+  collectSeparableSideEffects(copy, sideEffects);
+  // The results of the side effects are only used by other side effects.
+  for (auto *op : sideEffects)
+    op->dropAllUses();
+  for (auto *op : sideEffects)
+    op->erase();
+  process.replaceAllUsesWith(copy.getResults());
+
+  Deseq deseq(copy);
+  if (failed(deseq.deseq()))
+    return failure();
+
+  // If the copy could not be desequentialized, keep the original process.
+  if (!deseq.converted) {
+    copy.replaceAllUsesWith(process.getResults());
+    copy.erase();
+    return success();
+  }
+
+  // Otherwise keep the original process only for its side effects. Remove its
+  // results, and the values it yields upon suspension.
+  builder.setInsertionPoint(process);
+  auto newProcess =
+      ProcessOp::create(builder, process.getLoc(), TypeRange{}, ValueRange{});
+  newProcess.getBody().takeBody(process.getBody());
+  newProcess.getBody().walk([](Operation *op) {
+    if (auto waitOp = dyn_cast<WaitOp>(op))
+      waitOp.getYieldOperandsMutable().clear();
+    else if (auto haltOp = dyn_cast<HaltOp>(op))
+      haltOp.getYieldOperandsMutable().clear();
+  });
+  process.erase();
+  return success();
+}
+
 void DeseqPass::runOnOperation() {
   SmallVector<ProcessOp> processes(getOperation().getOps<ProcessOp>());
-  for (auto process : processes)
+  for (auto process : processes) {
+    SmallPtrSet<Operation *, 8> sideEffects;
+    if (process.getNumResults() > 0 &&
+        collectSeparableSideEffects(process, sideEffects) &&
+        !sideEffects.empty()) {
+      if (failed(deseqWithSideEffects(process))) {
+        signalPassFailure();
+        return;
+      }
+      continue;
+    }
     if (failed(Deseq(process).deseq())) {
       signalPassFailure();
       return;
     }
+  }
 }

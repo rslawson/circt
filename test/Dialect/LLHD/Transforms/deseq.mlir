@@ -1361,3 +1361,66 @@ hw.module @FalseInitialDrives(in %clock: i1, in %d: i42, in %c: i1) {
   // Don't initialize from drive at different time
   llhd.drv %3, %c123_i42 after %0 : i42
 }
+
+// Processes with side effects that do not produce values used outside the
+// side effects themselves, such as prints, are desequentialized. The original
+// process is kept for its side effects only, without any results.
+// CHECK-LABEL: @ClockPosEdgeWithPrint(
+hw.module @ClockPosEdgeWithPrint(in %clock: i1, in %d: i42) {
+  %c0_i42 = hw.constant 0 : i42
+  %0 = llhd.constant_time <0ns, 1d>
+  // CHECK: llhd.process {
+  // CHECK:   llhd.wait (%clock : i1), ^bb2(%clock : i1)
+  // CHECK:   [[STREAM:%.+]] = sim.sv.channel_to_output_stream
+  // CHECK:   sim.proc.print {{%.+}} to [[STREAM]]
+  // CHECK: }
+  // CHECK: [[CLK:%.+]] = seq.to_clock %clock
+  // CHECK: [[REG:%.+]] = seq.firreg %d clock [[CLK]] : i42
+  %1, %2 = llhd.process -> i42, i1 {
+    %true = hw.constant true
+    %false = hw.constant false
+    %stderr = hw.constant -2147483646 : i32
+    cf.br ^bb1(%c0_i42, %false : i42, i1)
+  ^bb1(%3: i42, %4: i1):
+    llhd.wait yield (%3, %4 : i42, i1), (%clock : i1), ^bb2(%clock : i1)
+  ^bb2(%5: i1):
+    %6 = comb.xor bin %5, %true : i1
+    %7 = comb.and bin %6, %clock : i1  // posedge clock
+    cf.cond_br %7, ^bb3, ^bb1(%c0_i42, %false : i42, i1)
+  ^bb3:
+    %lit = sim.fmt.literal "clock edge\0A"
+    %stream = sim.sv.channel_to_output_stream %stderr
+    sim.proc.print %lit to %stream
+    cf.br ^bb1(%d, %true : i42, i1)
+  }
+  %3 = llhd.sig : <i42>
+  // CHECK: llhd.assign {{%.+}}, [[REG]] :
+  llhd.drv %3, %1 after %0 if %2 : i42
+}
+
+// Processes with side effects producing values used in drives are not
+// desequentialized.
+// CHECK-LABEL: @ClockPosEdgeWithInseparableEffect(
+hw.module @ClockPosEdgeWithInseparableEffect(in %clock: i1) {
+  %c0_i32 = hw.constant 0 : i32
+  %0 = llhd.constant_time <0ns, 1d>
+  // CHECK-NOT: seq.firreg
+  // CHECK: llhd.process -> i32, i1
+  %1, %2 = llhd.process -> i32, i1 {
+    %true = hw.constant true
+    %false = hw.constant false
+    cf.br ^bb1(%c0_i32, %false : i32, i1)
+  ^bb1(%3: i32, %4: i1):
+    llhd.wait yield (%3, %4 : i32, i1), (%clock : i1), ^bb2(%clock : i1)
+  ^bb2(%5: i1):
+    %6 = comb.xor bin %5, %true : i1
+    %7 = comb.and bin %6, %clock : i1  // posedge clock
+    cf.cond_br %7, ^bb3, ^bb1(%c0_i32, %false : i32, i1)
+  ^bb3:
+    %name = sim.string.literal "file.txt"
+    %fd = sim.sv.fopen %name
+    cf.br ^bb1(%fd, %true : i32, i1)
+  }
+  %3 = llhd.sig : <i32>
+  llhd.drv %3, %1 after %0 if %2 : i32
+}
