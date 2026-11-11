@@ -8,6 +8,7 @@
 
 #include "circt/Dialect/Arc/ArcOps.h"
 #include "circt/Dialect/Arc/ArcPasses.h"
+#include "circt/Dialect/LLHD/LLHDOps.h"
 #include "circt/Dialect/SV/SVOps.h"
 #include "circt/Dialect/Seq/SeqOps.h"
 #include "mlir/Pass/Pass.h"
@@ -30,7 +31,8 @@ struct AddTapsPass : public arc::impl::AddTapsBase<AddTapsPass> {
   void runOnOperation() override {
     getOperation().walk([&](Operation *op) {
       TypeSwitch<Operation *>(op)
-          .Case<HWModuleOp, sv::WireOp, hw::WireOp>([&](auto op) { tap(op); })
+          .Case<HWModuleOp, sv::WireOp, hw::WireOp, llhd::SignalOp>(
+              [&](auto op) { tap(op); })
           .Default([&](auto) { tapIfNamed(op); });
     });
   }
@@ -78,6 +80,17 @@ struct AddTapsPass : public arc::impl::AddTapsBase<AddTapsPass> {
     }
     wireOp.getResult().replaceAllUsesWith(wireOp.getInput());
     wireOp->erase();
+  }
+
+  // Add taps for LLHD signals. The tap observes a probe of the signal, which
+  // reads the signal's value whenever the model is evaluated.
+  void tap(llhd::SignalOp sigOp) {
+    if (!tapWires || !sigOp.getName())
+      return;
+    OpBuilder builder(sigOp);
+    builder.setInsertionPointAfter(sigOp);
+    auto probeOp = llhd::ProbeOp::create(builder, sigOp.getLoc(), sigOp);
+    buildTap(builder, sigOp.getLoc(), probeOp, *sigOp.getName());
   }
 
   // Add taps for named values.

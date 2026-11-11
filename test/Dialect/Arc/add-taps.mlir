@@ -44,3 +44,14 @@ hw.module @Clocks(in %clk: !seq.clock) {
   // CHECK-NEXT: [[CAST:%.+]] = seq.from_clock %clk
   // CHECK-NEXT: arc.tap [[CAST]] {names = ["clk"]} : i1
 }
+
+// CHECK-LABEL: hw.module @Signals
+hw.module @Signals() {
+  // CHECK: [[SIG:%.+]] = llhd.sig
+  // CHECK-NEXT: [[PRB:%.+]] = llhd.prb [[SIG]] : i8
+  // CHECK-NEXT: arc.tap [[PRB]] {names = ["mySignal"]} : i8
+  %c0_i8 = hw.constant 0 : i8
+  %mySignal = llhd.sig %c0_i8 : <i8>
+  // CHECK-NOT: arc.tap
+  %0 = llhd.sig %c0_i8 : <i8>
+}

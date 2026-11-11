@@ -287,7 +287,13 @@ LogicalResult ModuleLowering::run() {
   // previous evaluation. A changing signal triggers a re-evaluation of the
   // model in the same time step (a delta cycle), which propagates the new
   // value to its readers.
+  //
+  // Taps that observe signals are lowered at the very end of the evaluation,
+  // such that they trace the signal's final value after all drives and pending
+  // updates. This matters if no further evaluation follows, for example after
+  // termination of the simulation.
   SmallVector<Operation *> signalDrives;
+  SmallVector<Operation *> signalTaps;
   for (auto &op : moduleOp.getOps()) {
     if (mlir::isMemoryEffectFree(&op) &&
         !isa<hw::OutputOp, sim::ClockedTerminateOp>(op))
@@ -296,6 +302,11 @@ LogicalResult ModuleLowering::run() {
       continue; // handled as part of `MemoryOp`
     if (isa<llhd::AssignOp, llhd::DriveOp>(op)) {
       signalDrives.push_back(&op);
+      continue;
+    }
+    if (auto tapOp = dyn_cast<TapOp>(op);
+        tapOp && tapOp.getValue().getDefiningOp<llhd::ProbeOp>()) {
+      signalTaps.push_back(&op);
       continue;
     }
     if (failed(lowerOp(&op)))
@@ -308,6 +319,10 @@ LogicalResult ModuleLowering::run() {
   // Apply pending signal updates scheduled by delayed drives.
   if (failed(lowerPendingSignalUpdates()))
     return failure();
+
+  for (auto *op : signalTaps)
+    if (failed(lowerOp(op)))
+      return failure();
 
   // Clean up any dead ops. The lowering inserts a few defensive
   // `arc.state_read` ops that may remain unused. This cleans them up.
@@ -457,11 +472,11 @@ SignalStorage &ModuleLowering::getSignalStorage(llhd::SignalOp op) {
   auto &storage = allocatedSignals[op];
   if (!storage.value) {
     auto type = op.getType().getNestedType();
-    auto alloc = AllocStateOp::create(allocBuilder, op.getLoc(),
-                                      StateType::get(type), storageArg);
-    if (auto name = op.getNameAttr())
-      alloc->setAttr("name", name);
-    storage.value = alloc;
+    // The signal is traced through taps added by `arc-add-taps`, so the state
+    // does not carry the signal's name. Writes to the state from coroutines
+    // could not be traced anyway.
+    storage.value = AllocStateOp::create(allocBuilder, op.getLoc(),
+                                         StateType::get(type), storageArg);
   }
   return storage;
 }
