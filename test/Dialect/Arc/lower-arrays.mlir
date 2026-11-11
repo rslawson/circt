@@ -216,3 +216,14 @@ func.func @StateElements(%arg0: !arc.state<!hw.array<5xi8>>, %arg1: i3, %arg2: i
   arc.state_write_element %arg0[%arg1] = %arg2 : <!hw.array<5xi8>>, i3, i8
   return %0 : i8
 }
+
+// Memories loaded from files are updated in place on a copy.
+// CHECK-LABEL: func.func @ReadMem
+// CHECK-SAME: (%arg0: !arc.arrayref<4xi8>, %arg1: !arc.arrayref<4xi8>, %arg2: !sim.dstring)
+func.func @ReadMem(%mem: !hw.array<4xi8>, %name: !sim.dstring) -> !hw.array<4xi8> {
+  // CHECK: [[COPY:%.+]] = arc.arrayref.copy %arg0 = %arg1
+  // CHECK: arc.arrayref.read_memory_file %arg2, [[COPY]] {descending = true, isBinary = true, lowAddress = 2 : i64} : <4xi8>
+  // CHECK: return [[COPY]]
+  %0 = sim.sv.readmem %name, %mem {isBinary = true, dimDescending = array<i1: true>, dimLows = array<i64: 2>} : !hw.array<4xi8>
+  return %0 : !hw.array<4xi8>
+}
