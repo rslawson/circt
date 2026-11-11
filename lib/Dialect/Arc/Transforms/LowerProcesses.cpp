@@ -904,9 +904,77 @@ struct LowerProcessesPass
 };
 } // namespace
 
+/// Convert an `llhd.combinational` op with side effects into an equivalent
+/// `llhd.process`. The combinational op re-executes its body whenever any of
+/// the values it uses changes. Without side effects, the body can simply be
+/// evaluated as part of every model evaluation. With side effects, such as
+/// prints or termination of the simulation, the body must only be executed
+/// once initially and whenever the used values change, which is exactly what a
+/// process waiting for changes of these values does.
+static void convertCombinationalWithSideEffects(llhd::CombinationalOp op) {
+  bool hasSideEffects = false;
+  op.getBody().walk([&](Operation *nestedOp) {
+    if (isa<llhd::YieldOp>(nestedOp) ||
+        nestedOp->hasTrait<OpTrait::IsTerminator>() ||
+        mlir::isMemoryEffectFree(nestedOp))
+      return WalkResult::advance();
+    hasSideEffects = true;
+    return WalkResult::interrupt();
+  });
+  if (!hasSideEffects)
+    return;
+
+  // Collect the values used by the body that are defined outside of it. The
+  // process observes changes of these values.
+  SetVector<Value> observed;
+  op.getBody().walk([&](Operation *nestedOp) {
+    for (auto operand : nestedOp->getOperands())
+      if (!op.getBody().isAncestor(operand.getParentRegion()) &&
+          !isa_and_nonnull<hw::ConstantOp>(operand.getDefiningOp()))
+        observed.insert(operand);
+  });
+
+  // Create the process and move the body into it. Add a new entry block that
+  // branches to the old entry block, which becomes the resume block of every
+  // wait. Signals used by the body are observed through a probe.
+  OpBuilder builder(op);
+  auto loc = op.getLoc();
+  auto processOp =
+      llhd::ProcessOp::create(builder, loc, op.getResultTypes(), ValueRange{});
+  processOp.getBody().takeBody(op.getBody());
+  auto *bodyBlock = &processOp.getBody().front();
+  builder.createBlock(&processOp.getBody(), processOp.getBody().begin());
+  SmallVector<Value> observedValues;
+  for (auto value : observed) {
+    if (isa<llhd::RefType>(value.getType()))
+      value = llhd::ProbeOp::create(builder, loc, value);
+    observedValues.push_back(value);
+  }
+  cf::BranchOp::create(builder, loc, bodyBlock);
+
+  // Replace each `llhd.yield` with a wait that yields the same values and
+  // resumes at the beginning of the body when an observed value changes.
+  SmallVector<llhd::YieldOp> yieldOps;
+  processOp.getBody().walk([&](llhd::YieldOp op) { yieldOps.push_back(op); });
+  for (auto yieldOp : yieldOps) {
+    builder.setInsertionPoint(yieldOp);
+    llhd::WaitOp::create(builder, yieldOp.getLoc(), yieldOp.getOperands(),
+                         /*delay=*/Value{}, observedValues, ValueRange{},
+                         bodyBlock);
+    yieldOp.erase();
+  }
+  op.replaceAllUsesWith(processOp.getResults());
+  op.erase();
+}
+
 void LowerProcessesPass::runOnOperation() {
   auto module = getOperation();
   auto &symbolTable = getAnalysis<SymbolTable>();
+
+  SmallVector<llhd::CombinationalOp> combOps;
+  module.walk([&](llhd::CombinationalOp op) { combOps.push_back(op); });
+  for (auto op : combOps)
+    convertCombinationalWithSideEffects(op);
 
   SmallVector<Operation *> ops;
   module.walk([&](Operation *op) {
