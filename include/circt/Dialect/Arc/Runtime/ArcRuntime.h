@@ -73,6 +73,12 @@ ARC_RUNTIME_EXPORT void arcRuntimeOnInitialized(struct ArcState *instance);
 /// Return the API version of the runtime library.
 ARC_RUNTIME_EXPORT uint64_t arcRuntimeGetAPIVersion();
 
+/// Set the command line arguments of the simulation, which are queried by the
+/// `$test$plusargs` and `$value$plusargs` system functions. Only arguments
+/// starting with `+` are considered.
+ARC_RUNTIME_EXPORT void arcRuntimeSetPlusArgs(int numArgs,
+                                              const char *const *args);
+
 /// Project a pointer to the model state to its ArcState container.
 /// `offset` is the byte offset of the given pointer within the model state.
 ARC_RUNTIME_EXPORT struct ArcState *

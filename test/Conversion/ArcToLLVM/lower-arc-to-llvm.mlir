@@ -356,6 +356,24 @@ func.func @DumpOps(%state: !arc.storage) {
   return
 }
 
+// CHECK-LABEL: llvm.func @PlusArgs
+func.func @PlusArgs() -> (i1, i1, i42) {
+  // CHECK: %[[PREFIX:.*]] = llvm.mlir.addressof @{{.*}} : !llvm.ptr
+  // CHECK: %[[TEST:.*]] = llvm.call @arcRuntimeIR_testPlusArgs(%[[PREFIX]]) : (!llvm.ptr) -> i8
+  // CHECK: %[[FOUND1:.*]] = llvm.icmp "ne" %[[TEST]], %{{.*}} : i8
+  %0 = sim.plusargs.test "foo"
+  // CHECK: %[[SLOT:.*]] = llvm.alloca %{{.*}} x i64 : (i32) -> !llvm.ptr
+  // CHECK: llvm.store %{{.*}}, %[[SLOT]] : i64, !llvm.ptr
+  // CHECK: %[[FMT:.*]] = llvm.mlir.addressof @{{.*}} : !llvm.ptr
+  // CHECK: %[[BITS:.*]] = llvm.mlir.constant(42 : i32) : i32
+  // CHECK: %[[VAL:.*]] = llvm.call @arcRuntimeIR_valuePlusArgs(%[[FMT]], %[[SLOT]], %[[BITS]]) : (!llvm.ptr, !llvm.ptr, i32) -> i8
+  // CHECK: %[[FOUND2:.*]] = llvm.icmp "ne" %[[VAL]], %{{.*}} : i8
+  // CHECK: %[[WORDS:.*]] = llvm.load %[[SLOT]] : !llvm.ptr -> i64
+  // CHECK: %[[RESULT:.*]] = llvm.trunc %[[WORDS]] : i64 to i42
+  %1, %2 = sim.plusargs.value "bar=%d" : i42
+  return %0, %1, %2 : i1, i1, i42
+}
+
 // CHECK-LABEL: llvm.func @IsTerminated
 // CHECK-SAME: (%[[STATE:.*]]: !llvm.ptr)
 func.func @IsTerminated(%state: !arc.storage) -> i1 {

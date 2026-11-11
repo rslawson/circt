@@ -1110,6 +1110,93 @@ struct DumpFileOpLowering : public OpConversionPattern<arc::DumpFileOp> {
   StringCache &stringCache;
 };
 
+// Lowers `sim.plusargs.test` to a call of the runtime library.
+struct PlusArgsTestOpLowering
+    : public OpConversionPattern<sim::PlusArgsTestOp> {
+  PlusArgsTestOpLowering(const TypeConverter &typeConverter,
+                         MLIRContext *context, StringCache &stringCache)
+      : OpConversionPattern(typeConverter, context), stringCache(stringCache) {}
+
+  LogicalResult
+  matchAndRewrite(sim::PlusArgsTestOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto moduleOp = op->getParentOfType<ModuleOp>();
+    auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+    auto i8Type = rewriter.getI8Type();
+    auto func = LLVM::lookupOrCreateFn(
+        rewriter, moduleOp, runtime::APICallbacks::symNameTestPlusArgs,
+        {ptrType}, i8Type);
+    if (failed(func))
+      return failure();
+    Value prefix = stringCache.getOrCreate(rewriter, op.getFormatString());
+    auto call = LLVM::CallOp::create(rewriter, loc, *func, ValueRange{prefix});
+    auto zero = LLVM::ConstantOp::create(rewriter, loc, i8Type,
+                                         rewriter.getI8IntegerAttr(0));
+    rewriter.replaceOpWithNewOp<LLVM::ICmpOp>(op, LLVM::ICmpPredicate::ne,
+                                              call.getResult(), zero);
+    return success();
+  }
+
+  StringCache &stringCache;
+};
+
+// Lowers `sim.plusargs.value` to a call of the runtime library, which writes
+// the parsed value to a stack slot if a matching plusarg is found.
+struct PlusArgsValueOpLowering
+    : public OpConversionPattern<sim::PlusArgsValueOp> {
+  PlusArgsValueOpLowering(const TypeConverter &typeConverter,
+                          MLIRContext *context, StringCache &stringCache)
+      : OpConversionPattern(typeConverter, context), stringCache(stringCache) {}
+
+  LogicalResult
+  matchAndRewrite(sim::PlusArgsValueOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto resultType = dyn_cast<IntegerType>(op.getResult().getType());
+    if (!resultType)
+      return rewriter.notifyMatchFailure(op, "only integer results supported");
+    auto moduleOp = op->getParentOfType<ModuleOp>();
+    auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+    auto i8Type = rewriter.getI8Type();
+    auto i32Type = rewriter.getI32Type();
+    auto func = LLVM::lookupOrCreateFn(
+        rewriter, moduleOp, runtime::APICallbacks::symNameValuePlusArgs,
+        {ptrType, ptrType, i32Type}, i8Type);
+    if (failed(func))
+      return failure();
+
+    // Allocate zero-initialized storage for the parsed value.
+    unsigned numBits = resultType.getWidth();
+    auto numWords = std::max<int64_t>(llvm::divideCeil(numBits, 64), 1);
+    auto wordsType = rewriter.getIntegerType(numWords * 64);
+    auto one = LLVM::ConstantOp::create(rewriter, loc, i32Type,
+                                        rewriter.getI32IntegerAttr(1));
+    auto slot = LLVM::AllocaOp::create(rewriter, loc, ptrType, wordsType, one);
+    auto zeroWords = LLVM::ConstantOp::create(
+        rewriter, loc, wordsType, rewriter.getIntegerAttr(wordsType, 0));
+    LLVM::StoreOp::create(rewriter, loc, zeroWords, slot);
+
+    // Call the runtime and read back the parsed value.
+    Value format = stringCache.getOrCreate(rewriter, op.getFormatString());
+    auto bits = LLVM::ConstantOp::create(rewriter, loc, i32Type,
+                                         rewriter.getI32IntegerAttr(numBits));
+    auto call = LLVM::CallOp::create(rewriter, loc, *func,
+                                     ValueRange{format, slot, bits});
+    auto zero = LLVM::ConstantOp::create(rewriter, loc, i8Type,
+                                         rewriter.getI8IntegerAttr(0));
+    Value found = LLVM::ICmpOp::create(rewriter, loc, LLVM::ICmpPredicate::ne,
+                                       call.getResult(), zero);
+    Value value = LLVM::LoadOp::create(rewriter, loc, wordsType, slot);
+    if (numBits != wordsType.getWidth())
+      value = LLVM::TruncOp::create(rewriter, loc, resultType, value);
+    rewriter.replaceOp(op, {found, value});
+    return success();
+  }
+
+  StringCache &stringCache;
+};
+
 // Lowers `arc.dump_vars` to a call of the runtime library.
 struct DumpVarsOpLowering : public OpConversionPattern<arc::DumpVarsOp> {
   using OpConversionPattern::OpConversionPattern;
@@ -2013,9 +2100,10 @@ void LowerArcToLLVMPass::runOnOperation() {
   patterns.add<ExecuteOp>(convert);
 
   StringCache stringCache;
-  patterns.add<DumpFileOpLowering, SimEmitValueOpLowering,
-               SimPrintFormattedProcOpLowering>(converter, &getContext(),
-                                                stringCache);
+  patterns
+      .add<DumpFileOpLowering, PlusArgsTestOpLowering, PlusArgsValueOpLowering,
+           SimEmitValueOpLowering, SimPrintFormattedProcOpLowering>(
+          converter, &getContext(), stringCache);
   patterns.add<SimStreamOpLowering<sim::StdoutStreamOp>>(
       converter, &getContext(), runtime::APICallbacks::symNameGetStdoutStream);
   patterns.add<SimStreamOpLowering<sim::StderrStreamOp>>(
