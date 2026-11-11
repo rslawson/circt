@@ -411,6 +411,8 @@ struct ConvertTrivially : public OpConversionPattern<Op> {
 
 using ConvertAllocState = ConvertTrivially<arc::AllocStateOp>;
 using ConvertStateWrite = ConvertTrivially<arc::StateWriteOp>;
+using ConvertStateReadElement = ConvertTrivially<arc::StateReadElementOp>;
+using ConvertStateWriteElement = ConvertTrivially<arc::StateWriteElementOp>;
 using ConvertRootInput = ConvertTrivially<arc::RootInputOp>;
 using ConvertRootOutput = ConvertTrivially<arc::RootOutputOp>;
 using ConvertUnrealizedConversionCast =
@@ -480,13 +482,14 @@ void LowerArraysPass::runOnOperation() {
   cf::populateCFStructuralTypeConversionsAndLegality(converter, patterns,
                                                      target);
 
-  patterns.add<ConvertFunc, ConvertReturn, ConvertCall,
-               ConvertAggregateConstant, ConvertArrayGet, ConvertArrayInject,
-               ConvertArraySlice, ConvertArrayConcat, ConvertArrayCreate,
-               ConvertStorageGet, ConvertMux, ConvertAllocState,
-               ConvertStateRead, ConvertStateWrite, ConvertRootInput,
-               ConvertRootOutput, ConvertUnrealizedConversionCast>(
-      converter, &getContext());
+  patterns
+      .add<ConvertFunc, ConvertReturn, ConvertCall, ConvertAggregateConstant,
+           ConvertArrayGet, ConvertArrayInject, ConvertArraySlice,
+           ConvertArrayConcat, ConvertArrayCreate, ConvertStorageGet,
+           ConvertMux, ConvertAllocState, ConvertStateRead, ConvertStateWrite,
+           ConvertStateReadElement, ConvertStateWriteElement, ConvertRootInput,
+           ConvertRootOutput, ConvertUnrealizedConversionCast>(converter,
+                                                               &getContext());
 
   ConversionConfig config;
   config.allowPatternRollback = false;

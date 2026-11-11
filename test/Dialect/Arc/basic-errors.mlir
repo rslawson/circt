@@ -751,3 +751,18 @@ arc.coroutine.define @Foo(%arg0: i42) {
 ^bb1(%arg1: i42, %arg2: i9001):
   arc.coroutine.halt
 }
+// -----
+
+func.func @StateReadElementNotArray(%arg0: !arc.state<i8>, %arg1: i3) {
+  // expected-error @below {{requires a state holding an array}}
+  %0 = arc.state_read_element %arg0[%arg1] : <i8>, i3 -> i8
+  return
+}
+
+// -----
+
+func.func @StateWriteElementTypeMismatch(%arg0: !arc.state<!hw.array<5xi8>>, %arg1: i3, %arg2: i4) {
+  // expected-error @below {{value type 'i4' does not match element type 'i8'}}
+  arc.state_write_element %arg0[%arg1] = %arg2 : <!hw.array<5xi8>>, i3, i4
+  return
+}

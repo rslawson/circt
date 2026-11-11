@@ -496,3 +496,12 @@ func.func @StorageAsContext(%storage: !arc.storage) -> (!arc.context) {
 func.func @StatesOfPointersAndFloats(%arg0: !arc.state<!hw.struct<a: !arc.state<i8>, b: f64, c: !arc.memory<4 x i8, i2>>>) {
   return
 }
+
+// CHECK-LABEL: func.func @StateElements
+func.func @StateElements(%arg0: !arc.state<!hw.array<5xi8>>, %arg1: i3, %arg2: i8) -> i8 {
+  // CHECK: [[V:%.+]] = arc.state_read_element %arg0[%arg1] : <!hw.array<5xi8>>, i3 -> i8
+  %0 = arc.state_read_element %arg0[%arg1] : <!hw.array<5xi8>>, i3 -> i8
+  // CHECK: arc.state_write_element %arg0[%arg1] = %arg2 : <!hw.array<5xi8>>, i3, i8
+  arc.state_write_element %arg0[%arg1] = %arg2 : <!hw.array<5xi8>>, i3, i8
+  return %0 : i8
+}

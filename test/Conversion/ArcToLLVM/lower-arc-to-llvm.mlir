@@ -496,3 +496,29 @@ func.func @UnclockedDPICall(%a: !sim.dstring) -> !sim.dstring {
   %0 = sim.func.dpi.call @dpi_impl(%a) : (!sim.dstring) -> !sim.dstring
   return %0 : !sim.dstring
 }
+
+// CHECK-LABEL: llvm.func @StateElements
+// CHECK-SAME: (%[[S:.*]]: !llvm.ptr, %[[T:.*]]: !llvm.ptr, %[[I:.*]]: i3, %[[J:.*]]: i2, %[[V:.*]]: i8)
+func.func @StateElements(%s: !arc.state<!hw.array<5xi8>>, %t: !arc.state<!hw.array<4xi8>>, %i: i3, %j: i2, %v: i8) -> (i8, i8) {
+  // Indices that may be out of bounds are checked.
+  // CHECK: %[[IDX:.*]] = llvm.zext %[[I]] : i3 to i64
+  // CHECK: %[[INBOUNDS:.*]] = llvm.icmp "ult" %[[IDX]], {{.*}} : i64
+  // CHECK: %[[PTR:.*]] = llvm.getelementptr %[[S]][0, %[[IDX]]] : (!llvm.ptr, i64) -> !llvm.ptr, !llvm.array<5 x i8>
+  // CHECK: llvm.cond_br %[[INBOUNDS]]
+  // CHECK: llvm.load %[[PTR]] : !llvm.ptr -> i8
+  // CHECK: llvm.mlir.zero : i8
+  %0 = arc.state_read_element %s[%i] : <!hw.array<5xi8>>, i3 -> i8
+  // CHECK: llvm.icmp "ult"
+  // CHECK: llvm.cond_br
+  // CHECK: llvm.store %[[V]], {{%.+}} : i8, !llvm.ptr
+  arc.state_write_element %s[%i] = %v : <!hw.array<5xi8>>, i3, i8
+  // Indices that cannot be out of bounds are not checked.
+  // CHECK-NOT: llvm.icmp
+  // CHECK: %[[PTR2:.*]] = llvm.getelementptr %[[T]][0, {{%.+}}] : (!llvm.ptr, i64) -> !llvm.ptr, !llvm.array<4 x i8>
+  // CHECK: llvm.load %[[PTR2]] : !llvm.ptr -> i8
+  %1 = arc.state_read_element %t[%j] : <!hw.array<4xi8>>, i2 -> i8
+  // CHECK-NOT: llvm.icmp
+  // CHECK: llvm.store %[[V]], {{%.+}} : i8, !llvm.ptr
+  arc.state_write_element %t[%j] = %v : <!hw.array<4xi8>>, i2, i8
+  return %0, %1 : i8, i8
+}
