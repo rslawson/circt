@@ -36,6 +36,14 @@ std::optional<uint64_t> circt::arc::computeLLVMBitWidth(Type type) {
   if (auto intType = dyn_cast<IntegerType>(type))
     return intType.getWidth();
 
+  if (auto floatType = dyn_cast<FloatType>(type))
+    return floatType.getWidth();
+
+  // States, memories, and storage are lowered to pointers. Arcilator only
+  // supports 64 bit targets.
+  if (isa<StateType, MemoryType, StorageType>(type))
+    return 64;
+
   auto computeForArrayType = [&](auto arrayType) -> std::optional<uint64_t> {
     // Compute element width.
     auto maybeWidth = computeLLVMBitWidth(arrayType.getElementType());

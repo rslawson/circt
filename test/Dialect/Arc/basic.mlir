@@ -479,3 +479,11 @@ func.func @StorageAsContext(%storage: !arc.storage) -> (!arc.context) {
   %ctxt  = arc.as_context %storage : !arc.storage
   return %ctxt : !arc.context
 }
+
+// States may hold pointer-like Arc types and floats, for example as part of a
+// coroutine's persisted state.
+// CHECK-LABEL: func.func @StatesOfPointersAndFloats
+// CHECK-SAME: !arc.state<!hw.struct<a: !arc.state<i8>, b: f64, c: !arc.memory<4 x i8, i2>>>
+func.func @StatesOfPointersAndFloats(%arg0: !arc.state<!hw.struct<a: !arc.state<i8>, b: f64, c: !arc.memory<4 x i8, i2>>>) {
+  return
+}
