@@ -11,6 +11,24 @@ function void dummyC(shortreal x); endfunction
 function void dummyD(string x); endfunction
 function void dummyE(byte x); endfunction
 
+// IEEE 1800-2017 § 21.7 "Value change dump (VCD) files"
+// CHECK-LABEL: func.func private @DumpBuiltins(
+function void DumpBuiltins();
+  // CHECK-NEXT: moore.builtin.dumpfile "waves.vcd"
+  $dumpfile("waves.vcd");
+  // CHECK-NEXT: moore.builtin.dumpvars
+  $dumpvars;
+  // CHECK-NEXT: moore.builtin.dumpvars
+  $dumpvars(0);
+  // The remaining dump control tasks are ignored.
+  $dumpoff;
+  $dumpon;
+  $dumpall;
+  $dumpflush;
+  $dumplimit(1000);
+  // CHECK-NEXT: return
+endfunction
+
 // IEEE 1800-2017 § 20.2 "Simulation control system tasks"
 // CHECK-LABEL: func.func private @SimulationControlBuiltins(
 function void SimulationControlBuiltins(bit x);

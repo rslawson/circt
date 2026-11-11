@@ -75,6 +75,11 @@ func.func @SimulationControl() {
   sim.pause verbose
   // CHECK: sim.pause quiet
   sim.pause quiet
+
+  // CHECK: sim.dump_file "waves.vcd"
+  sim.dump_file "waves.vcd"
+  // CHECK: sim.dump_vars
+  sim.dump_vars
   return
 }
 
