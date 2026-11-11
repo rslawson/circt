@@ -116,6 +116,9 @@ struct ImportVerilogOptions {
   /// for example when passing a `reg` vector holding a file name to `$fopen`.
   std::optional<bool> relaxStringConversions;
 
+  /// If true, allow integral values to be implicitly converted to enums.
+  std::optional<bool> relaxEnumConversions;
+
   /// If non-empty, specifies the list of modules that should serve as the top
   /// modules in the design. If empty, this will be automatically determined
   /// based on which modules are unreferenced elsewhere.
