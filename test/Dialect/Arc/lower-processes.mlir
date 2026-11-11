@@ -798,3 +798,38 @@ hw.module @ImmediateAssert(in %a: i1, in %en: i1) {
   }
   hw.output
 }
+
+//===----------------------------------------------------------------------===//
+// Combinational processes with side effects are converted into processes that
+// wait for changes of the values they use.
+
+// CHECK-LABEL: arc.coroutine.define @CombinationalSideEffects.llhd.process
+// CHECK-SAME: ([[A:%.+]]: i1) -> (i1, i1, i64)
+// CHECK:   cf.br ^[[BODY:.+]]([[A]] : i1)
+// CHECK: ^[[BODY]]([[A1:%.+]]: i1):
+// CHECK:   sim.proc.print
+// CHECK:   [[MASK:%.+]] = hw.constant true
+// CHECK:   arc.coroutine.yield ([[A1]], [[MASK]], {{%.+}} : i1, i1, i64), ^[[BODY]]
+
+// CHECK-LABEL: hw.module @CombinationalSideEffects
+// CHECK: arc.coroutine.instance @CombinationalSideEffects.llhd.process(%a) sensitive [true] : (i1) -> i1
+// CHECK-NOT: llhd.combinational
+hw.module @CombinationalSideEffects(in %a: i1, out x: i1) {
+  %0 = llhd.combinational -> i1 {
+    %lit = sim.fmt.literal "changed\0A"
+    sim.proc.print %lit
+    llhd.yield %a : i1
+  }
+  hw.output %0 : i1
+}
+
+// Combinational processes without side effects remain untouched.
+// CHECK-LABEL: hw.module @CombinationalPure
+// CHECK: llhd.combinational
+hw.module @CombinationalPure(in %a: i1, out x: i1) {
+  %0 = llhd.combinational -> i1 {
+    %1 = comb.xor %a, %a : i1
+    llhd.yield %1 : i1
+  }
+  hw.output %0 : i1
+}
