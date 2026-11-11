@@ -250,6 +250,11 @@ struct CLOptions {
       cl::desc("Allow integral values to be implicitly converted to strings."),
       cl::init(false), cl::cat(cat)};
 
+  cl::opt<bool> relaxEnumConversions{
+      "relax-enum-conversions",
+      cl::desc("Allow integral values to be implicitly converted to enums."),
+      cl::init(false), cl::cat(cat)};
+
   cl::list<std::string> topModules{
       "top",
       cl::desc("One or more top-level modules to instantiate (instead of "
@@ -385,6 +390,7 @@ static LogicalResult executeWithSources(MLIRContext *context,
   options.allowUseBeforeDeclare = opts.allowUseBeforeDeclare;
   options.ignoreUnknownModules = opts.ignoreUnknownModules;
   options.relaxStringConversions = opts.relaxStringConversions;
+  options.relaxEnumConversions = opts.relaxEnumConversions;
   if (opts.loweringMode != LoweringMode::OnlyLint)
     options.topModules = opts.topModules;
   options.paramOverrides = opts.paramOverrides;
