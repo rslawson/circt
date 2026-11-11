@@ -447,7 +447,8 @@ def SplitLoops : Pass<"arc-split-loops", "mlir::ModuleOp"> {
 def StripSV : Pass<"arc-strip-sv", "mlir::ModuleOp"> {
   let summary = "Remove SV wire, reg, and assigns";
   let dependentDialects = ["arc::ArcDialect", "comb::CombDialect",
-                           "hw::HWDialect", "seq::SeqDialect"];
+                           "hw::HWDialect", "llhd::LLHDDialect",
+                           "seq::SeqDialect"];
   let options = [
     Option<"asyncResetsAsSync", "async-resets-as-sync", "bool", "false",
       "Treat asynchronous resets as synchronous.">

@@ -9,6 +9,7 @@
 #include "circt/Dialect/Arc/ArcOps.h"
 #include "circt/Dialect/Arc/ArcPasses.h"
 #include "circt/Dialect/Comb/CombOps.h"
+#include "circt/Dialect/LLHD/LLHDOps.h"
 #include "circt/Dialect/SV/SVOps.h"
 #include "circt/Dialect/Seq/SeqOps.h"
 #include "circt/Dialect/Verif/VerifOps.h"
@@ -38,8 +39,8 @@ struct StripSVPass : public arc::impl::StripSVBase<StripSVPass> {
   SmallVector<Operation *> opsToDelete;
   SmallPtrSet<StringAttr, 4> clockGateModuleNames;
 
-  /// A register toggling on every assertion of an asynchronous reset.
-  DenseMap<Value, Value> resetToggles;
+  /// The clocks derived from asynchronous resets.
+  DenseMap<Value, Value> resetClocks;
   /// The condition under which registers with an asynchronous reset are forced
   /// to their reset value, for each pair of clock and reset.
   DenseMap<std::pair<Value, Value>, Value> resetOverrides;
@@ -48,13 +49,14 @@ struct StripSVPass : public arc::impl::StripSVBase<StripSVPass> {
 
 /// Get a condition that indicates whether a register clocked by `clock` with
 /// the asynchronous reset `reset` should be forced to its reset value. This is
-/// the case while the reset is asserted, and after an assertion of the reset
-/// until the next clock edge.
+/// the case after an assertion of the reset until the next clock edge.
 ///
-/// A toggle register clocked by the reset flips its value on every assertion
-/// of the reset. A register clocked by `clock` samples the toggle register on
-/// every clock edge. The two differ if the reset has been asserted since the
-/// last clock edge.
+/// A register clocked by the reset is set to the inverse of a register clocked
+/// by `clock` on every assertion of the reset. The latter register in turn
+/// samples the former on every clock edge. The two differ if the reset has
+/// been asserted since the last clock edge. The condition only depends on
+/// registers and a delayed signal, such that resets derived from the reset
+/// registers themselves do not form combinational loops.
 Value StripSVPass::getAsyncResetOverride(OpBuilder &builder, Location loc,
                                          Value clock, Value reset) {
   auto &override = resetOverrides[{clock, reset}];
@@ -66,21 +68,29 @@ Value StripSVPass::getAsyncResetOverride(OpBuilder &builder, Location loc,
     return seq::createConstantInitialValue(builder, loc,
                                            builder.getBoolAttr(false));
   };
-  auto &toggle = resetToggles[reset];
-  if (!toggle) {
-    auto resetClock = seq::ToClockOp::create(builder, loc, reset);
-    auto toggleReg = seq::CompRegOp::create(
-        builder, loc, i1Type, reset, resetClock, StringAttr{}, Value{}, Value{},
-        zeroInit(), hw::InnerSymAttr{});
-    toggleReg.getInputMutable().assign(
-        comb::createOrFoldNot(builder, loc, toggleReg, true));
-    toggle = toggleReg;
-  }
-  auto sampled =
-      seq::CompRegOp::create(builder, loc, i1Type, toggle, clock, StringAttr{},
-                             Value{}, Value{}, zeroInit(), hw::InnerSymAttr{});
-  auto pending = comb::XorOp::create(builder, loc, toggle, sampled, true);
-  override = comb::OrOp::create(builder, loc, reset, pending, true);
+  auto &resetClock = resetClocks[reset];
+  if (!resetClock)
+    resetClock = seq::ToClockOp::create(builder, loc, reset);
+  auto asserted = seq::CompRegOp::create(
+      builder, loc, i1Type, reset, resetClock, StringAttr{}, Value{}, Value{},
+      zeroInit(), hw::InnerSymAttr{});
+  auto sampled = seq::CompRegOp::create(builder, loc, i1Type, asserted, clock,
+                                        StringAttr{}, Value{}, Value{},
+                                        zeroInit(), hw::InnerSymAttr{});
+  asserted.getInputMutable().assign(
+      comb::createOrFoldNot(builder, loc, sampled, true));
+
+  // The reset takes effect one delta cycle after its assertion, like a
+  // nonblocking assignment in the register's process. Delay the assertion
+  // through a signal, which also allows the reset to depend on the registers
+  // it resets, as for example in a soft reset.
+  auto falseValue = hw::ConstantOp::create(builder, loc, i1Type, 0);
+  auto signal = llhd::SignalOp::create(builder, loc, llhd::RefType::get(i1Type),
+                                       StringAttr{}, falseValue);
+  auto delta = llhd::ConstantTimeOp::create(builder, loc, 0, "ns", /*delta=*/1);
+  llhd::DriveOp::create(builder, loc, signal, asserted, delta, Value{});
+  auto delayed = llhd::ProbeOp::create(builder, loc, signal);
+  override = comb::XorOp::create(builder, loc, delayed, sampled, true);
   return override;
 }
 
@@ -162,7 +172,7 @@ void StripSVPass::runOnOperation() {
   });
 
   for (auto module : mlirModule.getOps<hw::HWModuleOp>()) {
-    resetToggles.clear();
+    resetClocks.clear();
     resetOverrides.clear();
     for (Operation &op : *module.getBodyBlock()) {
       // Remove ifdefs and verbatim.
@@ -220,9 +230,9 @@ void StripSVPass::runOnOperation() {
         // Registers with an asynchronous reset take on their reset value as
         // soon as the reset is asserted, and keep it until the first clock
         // edge after the reset is released. Model this by overriding the
-        // value of the register while the reset is asserted or an assertion
-        // of the reset has not been followed by a clock edge yet. The
-        // register itself is reset synchronously.
+        // value of the register after an assertion of the reset until the
+        // next clock edge. The register itself is reset synchronously, which
+        // covers clock edges while the reset is asserted.
         if (reg.getIsAsync() && !asyncResetsAsSync) {
           auto override = getAsyncResetOverride(builder, reg.getLoc(),
                                                 reg.getClk(), reg.getReset());

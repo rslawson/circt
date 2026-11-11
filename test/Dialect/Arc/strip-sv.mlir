@@ -51,34 +51,41 @@ hw.module @HasBeenReset(in %clock: i1, in %reset: i1, out z: i1) {
   hw.output %0 : i1
 }
 
-// Registers with an asynchronous reset are forced to their reset value while
-// the reset is asserted, and after an assertion of the reset until the next
-// clock edge. A toggle register clocked by the reset records assertions of the
-// reset, which a register in the clock domain samples. The registers
-// themselves are reset synchronously.
+// Registers with an asynchronous reset are forced to their reset value after an
+// assertion of the reset until the next clock edge. A register clocked by the
+// reset is set to the inverse of a register in the clock domain, which in turn
+// samples it on every clock edge. The assertion takes effect one delta cycle
+// later through a signal. The registers themselves are reset synchronously.
 // CHECK-LABEL: hw.module @AsyncReset
 hw.module @AsyncReset(in %clk : !seq.clock, in %clk2 : !seq.clock, in %rst : i1, in %a : i8, in %b : i8, in %c : i8, out x : i8, out y : i8, out z : i8) {
   %c0_i8 = hw.constant 0 : i8
   %c1_i8 = hw.constant 1 : i8
   // CHECK-DAG: [[X:%.+]] = seq.compreg %a, %clk reset %rst, %c0_i8 : i8
   // CHECK-DAG: [[RSTCLK:%.+]] = seq.to_clock %rst
-  // CHECK-DAG: [[TOGGLE:%.+]] = seq.compreg [[NOTTOGGLE:%.+]], [[RSTCLK]] initial {{%.+}} : i1
-  // CHECK-DAG: [[NOTTOGGLE]] = comb.xor bin [[TOGGLE]], %true : i1
-  // CHECK-DAG: [[SAMPLED:%.+]] = seq.compreg [[TOGGLE]], %clk initial {{%.+}} : i1
-  // CHECK-DAG: [[PENDING:%.+]] = comb.xor bin [[TOGGLE]], [[SAMPLED]] : i1
-  // CHECK-DAG: [[OVERRIDE:%.+]] = comb.or bin %rst, [[PENDING]] : i1
-  // CHECK-DAG: [[XOUT:%.+]] = comb.mux [[OVERRIDE]], %c0_i8, [[X]] : i8
+  // CHECK-DAG: [[ASSERTED:%.+]] = seq.compreg [[NOTSAMPLED:%.+]], [[RSTCLK]] initial {{%.+}} : i1
+  // CHECK-DAG: [[SAMPLED:%.+]] = seq.compreg [[ASSERTED]], %clk initial {{%.+}} : i1
+  // CHECK-DAG: [[NOTSAMPLED]] = comb.xor bin [[SAMPLED]], %true : i1
+  // CHECK-DAG: [[SIG:%.+]] = llhd.sig %false : <i1>
+  // CHECK-DAG: [[DELTA:%.+]] = llhd.constant_time <0ns, 1d>
+  // CHECK-DAG: llhd.drv [[SIG]], [[ASSERTED]] after [[DELTA]] : i1
+  // CHECK-DAG: [[DELAYED:%.+]] = llhd.prb [[SIG]] : i1
+  // CHECK-DAG: [[PENDING:%.+]] = comb.xor bin [[DELAYED]], [[SAMPLED]] : i1
+  // CHECK-DAG: [[XOUT:%.+]] = comb.mux [[PENDING]], %c0_i8, [[X]] : i8
   %x = seq.firreg %a clock %clk reset async %rst, %c0_i8 : i8
   // Registers with the same clock and reset share the override.
   // CHECK-DAG: [[Y:%.+]] = seq.compreg %b, %clk reset %rst, %c1_i8 : i8
-  // CHECK-DAG: [[YOUT:%.+]] = comb.mux [[OVERRIDE]], %c1_i8, [[Y]] : i8
+  // CHECK-DAG: [[YOUT:%.+]] = comb.mux [[PENDING]], %c1_i8, [[Y]] : i8
   %y = seq.firreg %b clock %clk reset async %rst, %c1_i8 : i8
-  // Registers with a different clock share the toggle register.
+  // Registers with a different clock get their own override.
   // CHECK-DAG: [[Z:%.+]] = seq.compreg %c, %clk2 reset %rst, %c0_i8 : i8
-  // CHECK-DAG: [[SAMPLED2:%.+]] = seq.compreg [[TOGGLE]], %clk2 initial {{%.+}} : i1
-  // CHECK-DAG: [[PENDING2:%.+]] = comb.xor bin [[TOGGLE]], [[SAMPLED2]] : i1
-  // CHECK-DAG: [[OVERRIDE2:%.+]] = comb.or bin %rst, [[PENDING2]] : i1
-  // CHECK-DAG: [[ZOUT:%.+]] = comb.mux [[OVERRIDE2]], %c0_i8, [[Z]] : i8
+  // CHECK-DAG: [[ASSERTED2:%.+]] = seq.compreg [[NOTSAMPLED2:%.+]], [[RSTCLK]] initial {{%.+}} : i1
+  // CHECK-DAG: [[SAMPLED2:%.+]] = seq.compreg [[ASSERTED2]], %clk2 initial {{%.+}} : i1
+  // CHECK-DAG: [[NOTSAMPLED2]] = comb.xor bin [[SAMPLED2]], %true{{.*}} : i1
+  // CHECK-DAG: [[SIG2:%.+]] = llhd.sig %false{{.*}} : <i1>
+  // CHECK-DAG: llhd.drv [[SIG2]], [[ASSERTED2]] after {{%.+}} : i1
+  // CHECK-DAG: [[DELAYED2:%.+]] = llhd.prb [[SIG2]] : i1
+  // CHECK-DAG: [[PENDING2:%.+]] = comb.xor bin [[DELAYED2]], [[SAMPLED2]] : i1
+  // CHECK-DAG: [[ZOUT:%.+]] = comb.mux [[PENDING2]], %c0_i8, [[Z]] : i8
   %z = seq.firreg %c clock %clk2 reset async %rst, %c0_i8 : i8
   // CHECK: hw.output [[XOUT]], [[YOUT]], [[ZOUT]]
   hw.output %x, %y, %z : i8, i8, i8

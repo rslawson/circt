@@ -21,6 +21,8 @@
 // CHECK-NEXT: 63 now=100
 // CHECK-NEXT: 65 q=101
 // CHECK-NEXT: 73 now=101
+// CHECK-NEXT: 75 q=100
+// CHECK-NEXT: 79 now=100
 
 module top;
   logic clk = 0, rst_n = 1;
@@ -47,6 +49,12 @@ module top;
     #1 rst_n = 1;
     #1 $display("%0t now=%0d", $time, q);
     #10 $display("%0t now=%0d", $time, q);
+    // Two reset pulses between clock edges.
+    #2 rst_n = 0;
+    #1 rst_n = 1;
+    #1 rst_n = 0;
+    #1 rst_n = 1;
+    #1 $display("%0t now=%0d", $time, q);
     $finish;
   end
 
