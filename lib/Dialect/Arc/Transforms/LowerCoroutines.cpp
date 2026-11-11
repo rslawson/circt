@@ -57,12 +57,15 @@
 #include "circt/Dialect/Arc/ArcPasses.h"
 #include "circt/Dialect/Comb/CombOps.h"
 #include "circt/Dialect/HW/HWOps.h"
+#include "circt/Dialect/Sim/SimOps.h"
 #include "mlir/Analysis/Liveness.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/IR/AttrTypeSubElements.h"
 #include "mlir/IR/Dominance.h"
+#include "mlir/IR/IRMapping.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/GenericIteratedDominanceFrontier.h"
@@ -229,6 +232,48 @@ static void rematerializeConstant(Value value, Region &region,
     defOp->erase();
 }
 
+/// Clone the ops producing a format string into the blocks where the string is
+/// used. Format strings cannot be persisted across suspension points, but they
+/// are pure and can be recomputed from their operands instead, which are
+/// captured as usual.
+static void sinkFormatStrings(Region &region) {
+  auto isFormatString = [](Value value) {
+    return isa<sim::FormatStringType>(value.getType());
+  };
+  SmallVector<Operation *> formatOps;
+  region.walk([&](Operation *op) {
+    if (op->getNumResults() == 1 && isFormatString(op->getResult(0)) &&
+        isPure(op))
+      formatOps.push_back(op);
+  });
+
+  // Clone the ops producing a format string before an op using it.
+  std::function<Value(OpBuilder &, Value)> materialize =
+      [&](OpBuilder &builder, Value value) -> Value {
+    auto *defOp = value.getDefiningOp();
+    if (!defOp || !isFormatString(value) || !isPure(defOp))
+      return value;
+    IRMapping mapping;
+    for (auto operand : defOp->getOperands())
+      mapping.map(operand, materialize(builder, operand));
+    return builder.clone(*defOp, mapping)->getResult(0);
+  };
+
+  for (auto *op : formatOps) {
+    auto *block = op->getBlock();
+    for (auto &use : llvm::make_early_inc_range(op->getUses())) {
+      auto *user = use.getOwner();
+      if (user->getBlock() == block)
+        continue;
+      OpBuilder builder(user);
+      use.set(materialize(builder, use.get()));
+    }
+  }
+  for (auto *op : llvm::reverse(formatOps))
+    if (op->use_empty())
+      op->erase();
+}
+
 /// Rewrite the body of a coroutine such that every resume block captures the
 /// values that are live across the suspension points it resumes from as
 /// trailing block arguments.
@@ -240,6 +285,7 @@ static LogicalResult captureValuesAcrossSuspension(CoroutineDefineOp defineOp) {
   auto resumeBlocks = collectResumeBlocks(region);
   if (resumeBlocks.empty())
     return success();
+  sinkFormatStrings(region);
 
   // Compute the liveness and dominance of the original body once. The
   // per-value rewrites below only ever change the liveness of the value
