@@ -36,6 +36,15 @@ using llvm::SmallSetVector;
 // Probe Hoisting
 //===----------------------------------------------------------------------===//
 
+/// Values wider than this many bits are not hoisted out of processes. Hoisting
+/// would pass them into and out of the process as a whole, which is expensive
+/// for large values such as memories.
+static constexpr int64_t kMaxHoistedWidth = 4096;
+
+static bool isLargeValue(Type type) {
+  return hw::getBitWidth(type) > kMaxHoistedWidth;
+}
+
 namespace {
 /// The struct performing the hoisting of probes in a single region.
 struct ProbeHoister {
@@ -162,6 +171,14 @@ void ProbeHoister::hoistProbes() {
       if (liveAcrossWait.contains(probeOp)) {
         LLVM_DEBUG(llvm::dbgs()
                    << "- Skipping (live across wait) " << probeOp << "\n");
+        continue;
+      }
+
+      // Don't hoist probes of large values, such as memories. The hoisted
+      // value would be passed into the process as a whole.
+      if (isLargeValue(probeOp.getType())) {
+        LLVM_DEBUG(llvm::dbgs()
+                   << "- Skipping (large value) " << probeOp << "\n");
         continue;
       }
 
@@ -411,8 +428,11 @@ void DriveHoister::findHoistableSlots() {
     }
 
     // Skip slots with types for which we cannot materialize a default
-    // constant (needed when yielding values across wait boundaries).
+    // constant (needed when yielding values across wait boundaries). Also
+    // skip large values, such as memories, which would be yielded as a whole.
     auto sigType = cast<RefType>(slot.getType()).getNestedType();
+    if (isLargeValue(sigType))
+      return;
     if (!isa<TimeType>(sigType) && !isa<FloatType>(sigType) &&
         hw::getBitWidth(sigType) < 0)
       return;
