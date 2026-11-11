@@ -134,3 +134,32 @@ endmodule
 
 // CHECK: hw.module @Top2(in %c1.i : !llhd.ref<i1>) {
 // CHECK:   hw.instance "c2" @Child() -> ()
+
+// A reference into a sibling's subtree flows upward to the common ancestor and
+// from there downward to the referencing module. The referencing instance is
+// created after the instance providing the value, even if it comes first.
+module SiblingLeaf();
+  logic r;
+endmodule
+
+module SiblingMid();
+  SiblingLeaf leaf();
+endmodule
+
+module SiblingMonitor();
+  logic x;
+  assign x = SiblingTop.mid.leaf.r;
+endmodule
+
+// CHECK-LABEL: hw.module private @SiblingLeaf(out r : !llhd.ref<i1>)
+// CHECK-LABEL: hw.module private @SiblingMid(out leaf.r : !llhd.ref<i1>)
+// CHECK:         [[R:%.+]] = hw.instance "leaf" @SiblingLeaf() -> (r: !llhd.ref<i1>)
+// CHECK:         hw.output [[R]]
+// CHECK-LABEL: hw.module private @SiblingMonitor(in %mid.leaf.r : !llhd.ref<i1>)
+// CHECK-LABEL: hw.module @SiblingTop()
+// CHECK:         [[MIDR:%.+]] = hw.instance "mid" @SiblingMid() -> (leaf.r: !llhd.ref<i1>)
+// CHECK:         hw.instance "monitor" @SiblingMonitor(mid.leaf.r: [[MIDR]]: !llhd.ref<i1>) -> ()
+module SiblingTop();
+  SiblingMonitor monitor();
+  SiblingMid mid();
+endmodule
