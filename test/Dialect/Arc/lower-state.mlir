@@ -1259,3 +1259,17 @@ hw.module @ElementwiseSignal(in %idx: i10, in %v: i8) {
   // CHECK:   arc.state_write_element [[MASK]]
   hw.output
 }
+
+// Structs containing strings are supported in signals and compared field by
+// field.
+// CHECK-LABEL: arc.model @StructWithStringSignal
+hw.module @StructWithStringSignal(in %v: i8) {
+  // CHECK: [[S:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<!hw.struct<a: i8, b: !sim.dstring>>
+  %s = llhd.sig : <!hw.struct<a: i8, b: !sim.dstring>>
+  %a = llhd.sig.struct_extract %s["a"] : <!hw.struct<a: i8, b: !sim.dstring>>
+  // CHECK: [[OLD:%.+]] = arc.state_read [[S]]
+  // CHECK: [[NEW:%.+]] = hw.struct_inject [[OLD]]["a"]
+  // CHECK: arc.state_write [[S]] = [[NEW]]
+  llhd.assign %a, %v : i8
+  hw.output
+}
