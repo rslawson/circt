@@ -81,10 +81,11 @@ void emitScheduleWakeup(OpBuilder &builder, Location loc, Value arcContext,
 /// `delay` is null, the signal's value is updated immediately. Otherwise
 /// `delay` is an `i64` number of femtoseconds after which the value takes
 /// effect, and the drive updates the signal's shadow storage. A change of the
-/// signal's value requests a wakeup of the model at the current time.
+/// signal's value requests a wakeup of the model at the current time, and sets
+/// the optional `changeFlag` state.
 void emitDrive(OpBuilder &builder, Location loc, Value arcContext,
                const SignalStorage &storage, ArrayRef<Projection> projections,
-               Value value, Value delay);
+               Value value, Value delay, Value changeFlag = {});
 
 /// Check whether values of the given type can be converted to and from a flat
 /// integer with `toBits` and `fromBits`.

@@ -821,12 +821,19 @@ hw.module @TestSimToArcTerminateFailure(in %clock: !seq.clock, in %cond: i1) {
 // CHECK-LABEL: arc.model @CoroutineSensitiveInstance
 hw.module @CoroutineSensitiveInstance(in %in: i42, out o: i42) {
   // CHECK: [[CTX:%.+]] = arc.as_context %arg0 : !arc.storage
-  // CHECK-DAG: [[PC:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<!arc.coroutine_pc<@DummyCoroutine>>
-  // CHECK-DAG: [[STATE:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<!arc.coroutine_state<@DummyCoroutine>>
-  // CHECK-DAG: [[WAKEUP:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i64>
-  // CHECK-DAG: [[RESULT:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i42>
-  // CHECK-DAG: [[MASK:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i1>
-  // CHECK-DAG: [[PREV:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i42>
+  // CHECK: [[ACTIVE:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i1>
+  // CHECK: [[PC:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<!arc.coroutine_pc<@DummyCoroutine>>
+  // CHECK: [[STATE:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<!arc.coroutine_state<@DummyCoroutine>>
+  // CHECK: [[WAKEUP:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i64>
+  // CHECK: [[RESULT:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i42>
+  // CHECK: [[MASK:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i1>
+  // CHECK: [[PREV:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i42>
+
+  // The active change flag is cleared and the result read at the beginning of
+  // the evaluation.
+  // CHECK: [[FALSE:%.+]] = hw.constant false
+  // CHECK: arc.state_write [[ACTIVE]] = [[FALSE]] : <i1>
+  // CHECK: [[OUT:%.+]] = arc.state_read [[RESULT]] : <i42>
 
   // CHECK: [[ARG:%.+]] = arc.state_read %in_in : <i42>
   // CHECK: [[MASKVAL:%.+]] = arc.state_read [[MASK]] : <i1>
@@ -853,7 +860,14 @@ hw.module @CoroutineSensitiveInstance(in %in: i42, out o: i42) {
   // CHECK:   arc.state_write [[PC]] = [[RPC]] : <!arc.coroutine_pc<@DummyCoroutine>>
   // CHECK:   arc.state_write [[WAKEUP]] = [[WKEFF]] : <i64>
   // CHECK:   arc.state_write [[MASK]] = [[RES]]#1 : <i1>
+  // CHECK:   [[OLDRES:%.+]] = arc.state_read [[RESULT]] : <i42>
   // CHECK:   arc.state_write [[RESULT]] = [[RES]]#0 : <i42>
+  // CHECK:   [[RESCHANGED:%.+]] = comb.icmp ne [[OLDRES]], [[RES]]#0 : i42
+  // CHECK:   scf.if [[RESCHANGED]] {
+  // CHECK:     arc.set_next_wakeup
+  // CHECK:     [[TRUE:%.+]] = hw.constant true
+  // CHECK:     arc.state_write [[ACTIVE]] = [[TRUE]] : <i1>
+  // CHECK:   }
   // CHECK: }
 
   // CHECK: [[CUR:%.+]] = arc.state_read [[WAKEUP]] : <i64>
@@ -862,12 +876,10 @@ hw.module @CoroutineSensitiveInstance(in %in: i42, out o: i42) {
   // CHECK: arc.set_next_wakeup [[CTX]], [[MIN]]
   %0 = arc.coroutine.instance @DummyCoroutine(%in) sensitive [true] : (i42) -> i42
 
-  // CHECK: [[OUT:%.+]] = arc.state_read [[RESULT]] : <i42>
   // CHECK: func.call @ConsumeI42([[OUT]])
   func.call @ConsumeI42(%0) : (i42) -> ()
 
-  // CHECK: [[OUT2:%.+]] = arc.state_read [[RESULT]] : <i42>
-  // CHECK: arc.state_write %out_o = [[OUT2]] : <i42>
+  // CHECK: arc.state_write %out_o = [[OUT]] : <i42>
   hw.output %0 : i42
 }
 
@@ -878,7 +890,9 @@ hw.module @CoroutineInsensitiveInstance(in %in: i42, out o: i42) {
   // CHECK-NOT: arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i42>
 
   // CHECK: [[FALSE:%.+]] = hw.constant false
-  // CHECK: [[READY:%.+]] = comb.or %{{.+}}, [[FALSE]] : i1
+  // CHECK: arc.state_write {{%.+}} = [[FALSE]]
+  // CHECK: [[NOTCHANGED:%.+]] = hw.constant false
+  // CHECK: [[READY:%.+]] = comb.or %{{.+}}, [[NOTCHANGED]] : i1
   // CHECK: scf.if [[READY]] {
   // CHECK:   arc.coroutine.call @DummyCoroutine
   // CHECK: }
@@ -904,6 +918,7 @@ func.func private @ConsumeI8(i8)
 // CHECK-LABEL: arc.model @Signals
 hw.module @Signals(in %en: i1, in %v: i4, in %idx: i3) {
   // CHECK: [[CTX:%.+]] = arc.as_context %arg0
+  // CHECK: [[ACTIVE:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i1>
   // CHECK: [[S:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i8>
   // CHECK: [[NEXT:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i8>
   // CHECK: [[MASK:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i8>
@@ -931,6 +946,8 @@ hw.module @Signals(in %en: i1, in %v: i4, in %idx: i3) {
   // CHECK:     [[NW:%.+]] = arc.get_next_wakeup [[CTX]]
   // CHECK:     [[MIN:%.+]] = arith.minui [[NW]], [[NOW]] : i64
   // CHECK:     arc.set_next_wakeup [[CTX]], [[MIN]]
+  // CHECK:     [[TRUE:%.+]] = hw.constant true
+  // CHECK:     arc.state_write [[ACTIVE]] = [[TRUE]] : <i1>
   // CHECK:   }
   // CHECK: }
   llhd.assign %s, %p if %en : i8
@@ -962,6 +979,9 @@ hw.module @Signals(in %en: i1, in %v: i4, in %idx: i3) {
   // CHECK:   [[T:%.+]] = arc.state_read [[TIME]] : <i64>
   // CHECK:   [[ISDUE:%.+]] = comb.icmp uge [[NOW]], [[T]] : i64
   // CHECK:   scf.if [[ISDUE]] {
+  // CHECK:     [[ACT:%.+]] = arc.state_read [[ACTIVE]] : <i1>
+  // CHECK:     [[NOACT:%.+]] = comb.xor [[ACT]], {{%.+}} : i1
+  // CHECK:     scf.if [[NOACT]] {
   // CHECK:     [[CUR:%.+]] = arc.state_read [[S]] : <i8>
   // CHECK:     [[NV:%.+]] = arc.state_read [[NEXT]] : <i8>
   // CHECK:     [[ONES:%.+]] = hw.constant -1 : i8
@@ -991,8 +1011,8 @@ hw.module @AggregateSignals(in %idx: i1, in %v: i8, out o: i8) {
   %s = llhd.sig : <!hw.struct<a: !hw.array<2xi8>>>
   %a = llhd.sig.struct_extract %s["a"] : <!hw.struct<a: !hw.array<2xi8>>>
   %e = llhd.sig.array_get %a[%idx] : <!hw.array<2xi8>>
-  // CHECK: [[IDX:%.+]] = arc.state_read %in_idx
   // CHECK: [[SV:%.+]] = arc.state_read [[S]]
+  // CHECK: [[IDX:%.+]] = arc.state_read %in_idx
   // CHECK: [[AV:%.+]] = hw.struct_extract [[SV]]["a"]
   // CHECK: [[EV:%.+]] = hw.array_get [[AV]][[[IDX]]]
   %p = llhd.prb %e : i8
@@ -1107,4 +1127,32 @@ arc.coroutine.define @SelfFeedbackCoroutine(%arg0: i4) -> (i4, i1, i64) {
   %mask = hw.constant 1 : i1
   %never = hw.constant -1 : i64
   arc.coroutine.halt %arg0, %mask, %never : i4, i1, i64
+}
+
+// Coroutines sample their arguments before states are updated by a clock edge
+// in the same evaluation, like processes in SystemVerilog execute before
+// nonblocking assignments take effect. State updates request another
+// evaluation in the same time step if the model contains coroutines.
+// CHECK-LABEL: arc.model @CoroutineSamplesOldState
+hw.module @CoroutineSamplesOldState(in %clk: !seq.clock, in %d: i8) {
+  // CHECK: [[CTX:%.+]] = arc.as_context %arg0
+  // CHECK: [[Q:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i8>
+  // CHECK: [[OLDQ:%.+]] = arc.state_read [[Q]] : <i8>
+  // CHECK: scf.if {{%.+}} {
+  // CHECK:   arc.state_write [[Q]] = {{%.+}} : <i8>
+  // CHECK:   [[NOW:%.+]] = arc.current_time [[CTX]]
+  // CHECK:   arc.set_next_wakeup [[CTX]]
+  // CHECK: }
+  // CHECK: arc.coroutine.call @ObserveCoroutine({{%.+}}, {{%.+}}, [[OLDQ]])
+  %q = arc.state @IdentityArc8(%d) clock %clk latency 1 : (i8) -> i8
+  arc.coroutine.instance @ObserveCoroutine(%q) sensitive [true] : (i8) -> ()
+  hw.output
+}
+arc.define @IdentityArc8(%arg0: i8) -> i8 {
+  arc.output %arg0 : i8
+}
+arc.coroutine.define @ObserveCoroutine(%arg0: i8) -> (i1, i64) {
+  %mask = hw.constant 1 : i1
+  %never = hw.constant -1 : i64
+  arc.coroutine.halt %mask, %never : i1, i64
 }
