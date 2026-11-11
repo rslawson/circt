@@ -1963,16 +1963,32 @@ LogicalResult OpLowering::lowerDrive(Operation *op, Value signal, Value value,
     immediate = *constDelay == 0 && constOp.getValue().getDelta() == 0;
   }
 
-  // Make sure all operands are lowered.
+  // Make sure all operands are lowered. Operands that are results of
+  // coroutines are read after the coroutine has been executed in this
+  // evaluation, instead of through the snapshot at the beginning of the
+  // evaluation. This applies drives hoisted out of processes in the same
+  // evaluation as the drives the process performs itself.
+  auto lowerOperand = [&](Value operand) -> Value {
+    auto instanceOp = operand.getDefiningOp<CoroutineInstanceOp>();
+    if (!instanceOp)
+      return lowerValue(operand, phase);
+    if (initial) {
+      addPending(instanceOp, phase);
+      return {};
+    }
+    return StateReadOp::create(
+        module.builder, operand.getLoc(),
+        module.getAllocatedState(cast<OpResult>(operand)));
+  };
   llhd::SignalOp rootOp;
   SmallVector<signals::Projection> projections;
   auto refResult = lowerRef(signal, phase, rootOp, projections);
-  auto loweredValue = lowerValue(value, phase);
+  auto loweredValue = lowerOperand(value);
   Value loweredEnable, loweredDelay;
   if (enable)
-    loweredEnable = lowerValue(enable, phase);
+    loweredEnable = lowerOperand(enable);
   if (!constDelay)
-    loweredDelay = lowerValue(delay, phase);
+    loweredDelay = lowerOperand(delay);
   if (initial)
     return success();
   if (failed(refResult) || !loweredValue || (enable && !loweredEnable) ||
