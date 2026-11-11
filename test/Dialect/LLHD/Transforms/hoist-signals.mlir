@@ -579,3 +579,22 @@ hw.module @HoistSingleDriveOfSignalDrivenElsewhere(in %u: i42) {
   // CHECK: llhd.assign %a, %u
   llhd.assign %a, %u : i42
 }
+
+// Probes and drives of large values, such as memories, are not hoisted, since
+// they would be passed into and out of the process as a whole.
+// CHECK-LABEL: @DontHoistLargeValues
+hw.module @DontHoistLargeValues(in %v: !hw.array<1024xi8>) {
+  %a = llhd.sig : <!hw.array<1024xi8>>
+  // CHECK: llhd.process {
+  llhd.process {
+    llhd.wait ^bb1
+  ^bb1:
+    // CHECK: llhd.prb %a
+    %0 = llhd.prb %a : !hw.array<1024xi8>
+    func.call @use_array(%0) : (!hw.array<1024xi8>) -> ()
+    // CHECK: llhd.assign %a, %v
+    llhd.assign %a, %v : !hw.array<1024xi8>
+    llhd.halt
+  }
+}
+func.func private @use_array(%arg0: !hw.array<1024xi8>)
