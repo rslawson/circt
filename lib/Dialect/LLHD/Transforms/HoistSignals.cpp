@@ -337,6 +337,8 @@ struct DriveHoister {
   SmallSetVector<Value, 8> slots;
   SmallVector<Operation *> suspendOps;
   SmallDenseMap<Value, DriveSet> driveSets;
+  /// The slots whose root signal is also driven outside of the process.
+  SmallPtrSet<Value, 8> externallyDriven;
 };
 } // namespace
 
@@ -396,9 +398,12 @@ void DriveHoister::findHoistableSlots() {
             worklist.push_back(user->getResult(0));
           continue;
         }
-        // Ignore other uses outside of the region.
-        if (!processOp.getBody().isAncestor(user->getParentRegion()))
+        // Ignore other uses outside of the region, but note other drivers.
+        if (!processOp.getBody().isAncestor(user->getParentRegion())) {
+          if (isa<DriveLikeOp>(user))
+            externallyDriven.insert(slot);
           continue;
+        }
         // Bail out on unwanted uses.
         if (!isa<ProbeOp, DriveLikeOp>(user))
           return;
@@ -534,6 +539,21 @@ void DriveHoister::collectDriveSets() {
 /// determine which values are uniform and available outside the process, such
 /// that we don't create unnecessary process results.
 void DriveHoister::finalizeDriveSets() {
+  // Hoisted drives are executed whenever the values yielded by the process
+  // change. If a signal has other drivers, they may change the signal between
+  // two suspensions of the process that both drive the same value. The second
+  // drive would then no longer take effect. Don't hoist drives of such signals
+  // that are driven before multiple suspension points.
+  for (auto slot : externallyDriven) {
+    auto it = driveSets.find(slot);
+    if (it == driveSets.end() || it->second.operands.size() <= 1)
+      continue;
+    LLVM_DEBUG(llvm::dbgs()
+               << "- Skipping (driven elsewhere): " << slot << "\n");
+    driveSets.erase(it);
+    slots.remove(slot);
+  }
+
   auto falseAttr = BoolAttr::get(processOp.getContext(), false);
   for (auto &[slot, driveSet] : driveSets) {
     // Insert drives with enable set to false for any terminators that are

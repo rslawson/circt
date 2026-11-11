@@ -541,3 +541,41 @@ hw.module @HoistProbesObservedAtSameTime(in %b: i1) {
     llhd.wait ^bb1
   }
 }
+
+// Drives of signals with other drivers are not hoisted if the process drives
+// them before multiple suspension points. The hoisted drive would only take
+// effect if the driven value changes, but the other driver may have changed
+// the signal in the meantime.
+// CHECK-LABEL: @DontHoistDrivesOfSignalsDrivenElsewhere
+hw.module @DontHoistDrivesOfSignalsDrivenElsewhere(in %u: i42) {
+  %c0_i42 = hw.constant 0 : i42
+  %a = llhd.sig %c0_i42 : <i42>
+  // CHECK: llhd.process {
+  llhd.process {
+    // CHECK: llhd.assign %a, %c0_i42
+    llhd.assign %a, %c0_i42 : i42
+    llhd.wait ^bb1
+  ^bb1:
+    // CHECK: llhd.assign %a, %c0_i42
+    llhd.assign %a, %c0_i42 : i42
+    llhd.halt
+  }
+  llhd.assign %a, %u : i42
+}
+
+// A single drive before the process halts is still hoisted.
+// CHECK-LABEL: @HoistSingleDriveOfSignalDrivenElsewhere
+hw.module @HoistSingleDriveOfSignalDrivenElsewhere(in %u: i42) {
+  %c0_i42 = hw.constant 0 : i42
+  %a = llhd.sig %c0_i42 : <i42>
+  // CHECK: llhd.process {
+  llhd.process {
+    // CHECK-NOT: llhd.assign
+    llhd.assign %a, %c0_i42 : i42
+    // CHECK: llhd.halt
+    llhd.halt
+  }
+  // CHECK: llhd.assign %a, %c0_i42
+  // CHECK: llhd.assign %a, %u
+  llhd.assign %a, %u : i42
+}
