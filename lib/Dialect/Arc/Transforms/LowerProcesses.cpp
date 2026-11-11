@@ -63,6 +63,7 @@
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/Pass.h"
+#include "mlir/Transforms/RegionUtils.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/Support/GenericIteratedDominanceFrontier.h"
@@ -101,6 +102,7 @@ private:
   Region &getBody() { return op->getRegion(0); }
   SmallVector<Value> createZeroResults(OpBuilder &builder, Location loc);
   void replaceUnreachables();
+  void forwardInvariantReferences();
   LogicalResult expandCoroutineCalls();
   void collectCaptures();
   void createCoroutine();
@@ -196,6 +198,58 @@ SmallVector<Value> ProcessLowering::createZeroResults(OpBuilder &builder,
   for (auto type : resultTypes)
     values.push_back(createZeroValue(builder, loc, type));
   return values;
+}
+
+/// Replace block arguments holding signal references with the reference
+/// itself, if all predecessors pass the same reference defined outside of the
+/// body. Signal accesses can only be lowered if the accessed signal is known.
+void ProcessLowering::forwardInvariantReferences() {
+  auto &body = op->getRegion(0);
+  for (auto &block : body) {
+    if (block.isEntryBlock())
+      continue;
+    for (int argIdx = block.getNumArguments() - 1; argIdx >= 0; --argIdx) {
+      auto arg = block.getArgument(argIdx);
+      if (!isa<llhd::RefType>(arg.getType()))
+        continue;
+      // Collect the incoming values from all predecessors.
+      // The successor operands of `llhd.wait` are its destination operands.
+      auto getOperands =
+          [](BlockOperand &use) -> std::optional<MutableOperandRange> {
+        if (auto waitOp = dyn_cast<llhd::WaitOp>(use.getOwner()))
+          return waitOp.getDestOperandsMutable();
+        if (auto branchOp = dyn_cast<BranchOpInterface>(use.getOwner())) {
+          auto operands = branchOp.getSuccessorOperands(use.getOperandNumber());
+          if (operands.getProducedOperandCount() != 0)
+            return std::nullopt;
+          return operands.getMutableForwardedOperands();
+        }
+        return std::nullopt;
+      };
+      Value incoming;
+      bool invariant = true;
+      for (auto &use : block.getUses()) {
+        auto operands = getOperands(use);
+        if (!operands || operands->size() <= unsigned(argIdx)) {
+          invariant = false;
+          break;
+        }
+        auto value = (*operands)[argIdx].get();
+        if (incoming && value != incoming) {
+          invariant = false;
+          break;
+        }
+        incoming = value;
+      }
+      if (!invariant || !incoming ||
+          body.isAncestor(incoming.getParentRegion()))
+        continue;
+      arg.replaceAllUsesWith(incoming);
+      for (auto &use : llvm::make_early_inc_range(block.getUses()))
+        getOperands(use)->erase(argIdx);
+      block.eraseArgument(argIdx);
+    }
+  }
 }
 
 /// Replace `ub.unreachable` terminators in the body with `llhd.halt` ops that
@@ -867,6 +921,12 @@ void ProcessLowering::buildInstance() {
 }
 
 LogicalResult ProcessLowering::run() {
+  // Remove blocks that are unreachable from the entry block. They are dead,
+  // and are not visited by the dominance-based renaming of the coroutine
+  // arguments below, which would leave their branches with missing operands.
+  IRRewriter rewriter(op->getContext());
+  (void)eraseUnreachableBlocks(rewriter, op->getRegions());
+  forwardInvariantReferences();
   replaceUnreachables();
   if (failed(expandCoroutineCalls()))
     return failure();

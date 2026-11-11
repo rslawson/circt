@@ -855,3 +855,41 @@ hw.module @FormatStringCapture(in %x: i8) {
   }
   hw.output
 }
+
+// Blocks unreachable from the entry block are removed. They would otherwise
+// keep branching to blocks that receive new arguments during the lowering.
+// CHECK-LABEL: arc.coroutine.define @UnreachableBlocks.llhd.process
+// CHECK-NOT: ^bb3
+hw.module @UnreachableBlocks(in %a: i1, in %b: i1) {
+  llhd.process {
+    cf.br ^bb1
+  ^bb1:
+    llhd.wait (%a : i1), ^bb2
+  ^bb2:
+    cf.cond_br %b, ^bb1, ^bb1
+  ^bb3:
+    cf.br ^bb1
+  }
+  hw.output
+}
+
+// References forwarded to a block by all predecessors are replaced with the
+// reference itself, such that the accessed signal is known.
+// CHECK-LABEL: arc.coroutine.define @ForwardedReference.llhd.process
+// CHECK-SAME: (%arg0: !llhd.ref<i8>)
+// CHECK: ^bb1({{%.+}}: !llhd.ref<i8>):
+// CHECK-NEXT: llhd.prb %arg0
+hw.module @ForwardedReference() {
+  %c0_i8 = hw.constant 0 : i8
+  %t = llhd.constant_time <1ns, 0d>
+  %s = llhd.sig %c0_i8 : <i8>
+  llhd.process {
+    llhd.wait delay %t, ^bb1(%s : !llhd.ref<i8>)
+  ^bb1(%r: !llhd.ref<i8>):
+    %0 = llhd.prb %r : i8
+    %1 = sim.fmt.dec %0 : i8
+    sim.proc.print %1
+    llhd.halt
+  }
+  hw.output
+}
