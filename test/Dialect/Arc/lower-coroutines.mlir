@@ -382,3 +382,27 @@ func.func private @CallsHelper(%arg0: !arc.coroutine_state<@Child>) -> !arc.coro
 // CHECK-SAME: (!hw.struct<s: !hw.union<r1: !hw.struct<f0: i8>>, p: !hw.union<a: i2, b: i1>>)
 // CHECK-SAME: -> !hw.array<2xstruct<x: i2>>
 func.func private @AggregateHelper(!hw.struct<s: !arc.coroutine_state<@Child>, p: !hw.union<a: !arc.coroutine_pc<@Child>, b: i1>>) -> !hw.array<2xstruct<x: !arc.coroutine_pc<@Child>>>
+
+// Format strings cannot be persisted across suspension points. The ops
+// producing them are cloned into the blocks using them, such that only their
+// operands are persisted.
+// CHECK-LABEL: func.func private @FormatStringAcrossSuspension
+// CHECK-SAME: (%arg0: !hw.union<r1: !hw.struct<f0: i8>>, %arg1: i2, %arg2: i8)
+arc.coroutine.define @FormatStringAcrossSuspension(%arg0: i8) {
+  %c1_i8 = hw.constant 1 : i8
+  %0 = comb.add %arg0, %c1_i8 : i8
+  %1 = sim.fmt.literal "v="
+  %2 = sim.fmt.dec %0 : i8
+  %3 = sim.fmt.concat (%1, %2)
+  // CHECK: [[V:%.+]] = comb.add
+  // CHECK: hw.struct_create ([[V]]) : !hw.struct<f0: i8>
+  arc.coroutine.yield ^bb1
+  // CHECK: ^{{.+}}({{%.+}}: i8, [[PV:%.+]]: i8):
+  // CHECK: [[LIT:%.+]] = sim.fmt.literal "v="
+  // CHECK: [[DEC:%.+]] = sim.fmt.dec [[PV]] : i8
+  // CHECK: [[CAT:%.+]] = sim.fmt.concat ([[LIT]], [[DEC]])
+  // CHECK: sim.proc.print [[CAT]]
+^bb1(%arg1: i8):
+  sim.proc.print %3
+  arc.coroutine.halt
+}
