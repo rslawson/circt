@@ -344,6 +344,19 @@ func.func @NextWakeup(%state: !arc.storage, %t: i64) -> i64 {
   return %0 : i64
 }
 
+// CHECK-LABEL: llvm.func @IsTerminated
+// CHECK-SAME: (%[[STATE:.*]]: !llvm.ptr)
+func.func @IsTerminated(%state: !arc.storage) -> i1 {
+  %ctx = arc.as_context %state : !arc.storage
+  // CHECK-NEXT: %[[GEP:.*]] = llvm.getelementptr %[[STATE]][8] : (!llvm.ptr) -> !llvm.ptr, i8
+  // CHECK-NEXT: %[[FLAG:.*]] = llvm.load %[[GEP]] : !llvm.ptr -> i8
+  // CHECK-NEXT: %[[ZERO:.*]] = llvm.mlir.constant(0 : i8) : i8
+  // CHECK-NEXT: %[[RES:.*]] = llvm.icmp "ne" %[[FLAG]], %[[ZERO]] : i8
+  // CHECK-NEXT: llvm.return %[[RES]]
+  %0 = arc.is_terminated %ctx
+  return %0 : i1
+}
+
 
 // CHECK-LABEL: llvm.func @test_success_eval
 // CHECK-SAME: (%[[STATE:.*]]: !llvm.ptr, %[[COND:.*]]: i1)

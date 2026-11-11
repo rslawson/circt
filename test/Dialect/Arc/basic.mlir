@@ -363,6 +363,13 @@ func.func @NextWakeup(%arg0: !arc.context, %arg1: i64) {
   return
 }
 
+// CHECK-LABEL: func.func @IsTerminated
+func.func @IsTerminated(%arg0: !arc.context) -> i1 {
+  // CHECK-NEXT: arc.is_terminated %arg0
+  %0 = arc.is_terminated %arg0
+  return %0 : i1
+}
+
 // CHECK-LABEL: func.func @SimGetSetTime
 func.func @SimGetSetTime(%time: i64) {
   arc.sim.instantiate @TimeTestModule as %model {

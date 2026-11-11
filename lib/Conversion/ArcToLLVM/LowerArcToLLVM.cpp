@@ -1110,6 +1110,30 @@ struct TerminateOpLowering : public OpConversionPattern<arc::TerminateOp> {
   }
 };
 
+// Loads the termination flag from the model's storage at
+// `kTerminateFlagOffset` and checks whether it is set.
+struct IsTerminatedOpLowering
+    : public OpConversionPattern<arc::IsTerminatedOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(arc::IsTerminatedOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto i8Type = rewriter.getI8Type();
+    auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+    Value flagPtr = LLVM::GEPOp::create(
+        rewriter, loc, ptrType, i8Type, adaptor.getArcContext(),
+        ArrayRef<LLVM::GEPArg>{arc::kTerminateFlagOffset});
+    Value flag = LLVM::LoadOp::create(rewriter, loc, i8Type, flagPtr);
+    Value zero = LLVM::ConstantOp::create(rewriter, loc, i8Type,
+                                          rewriter.getI8IntegerAttr(0));
+    rewriter.replaceOpWithNewOp<LLVM::ICmpOp>(op, LLVM::ICmpPredicate::ne, flag,
+                                              zero);
+    return success();
+  }
+};
+
 // Loads the next wakeup time (i64 femtoseconds) from the model's storage at
 // `kNextWakeupOffset`.
 struct GetNextWakeupOpLowering
@@ -1911,6 +1935,7 @@ void LowerArcToLLVMPass::runOnOperation() {
     ConstantTimeOpLowering,
     CurrentTimeOpLowering,
     GetNextWakeupOpLowering,
+    IsTerminatedOpLowering,
     IntToTimeOpLowering,
     MemoryReadOpLowering,
     MemoryWriteOpLowering,
