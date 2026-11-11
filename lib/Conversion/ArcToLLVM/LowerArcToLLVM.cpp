@@ -1297,6 +1297,65 @@ struct SVReadMemOpLowering : public OpConversionPattern<sim::SVReadMemOp> {
   }
 };
 
+// Lowers an op to a call of a runtime library function, passing the op's
+// operands as arguments and returning the function's result as the op's
+// result, if any.
+template <typename SourceOp>
+struct RuntimeCallLowering : public OpConversionPattern<SourceOp> {
+  RuntimeCallLowering(const TypeConverter &typeConverter, MLIRContext *context,
+                      StringRef symbolName)
+      : OpConversionPattern<SourceOp>(typeConverter, context),
+        symbolName(symbolName) {}
+
+  LogicalResult
+  matchAndRewrite(SourceOp op, typename SourceOp::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Type resultType = LLVM::LLVMVoidType::get(rewriter.getContext());
+    if (op->getNumResults() == 1)
+      resultType =
+          this->getTypeConverter()->convertType(op->getResult(0).getType());
+    if (!resultType)
+      return failure();
+    auto operands = adaptor.getOperands();
+    auto func = LLVM::lookupOrCreateFn(
+        rewriter, op->template getParentOfType<ModuleOp>(), symbolName,
+        llvm::to_vector(ValueRange(operands).getTypes()), resultType);
+    if (failed(func))
+      return failure();
+    auto callOp = LLVM::CallOp::create(rewriter, op.getLoc(), *func, operands);
+    rewriter.replaceOp(op, callOp.getResults());
+    return success();
+  }
+
+  StringRef symbolName;
+};
+
+// Lowers `sim.sv.fopen` to a call of the runtime library. The mode is passed
+// as an integer, with -1 indicating a multichannel descriptor.
+struct SVFOpenOpLowering : public OpConversionPattern<sim::SVFOpenOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(sim::SVFOpenOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+    auto i32Type = rewriter.getI32Type();
+    auto func = LLVM::lookupOrCreateFn(
+        rewriter, op->getParentOfType<ModuleOp>(),
+        runtime::APICallbacks::symNameFopen, {ptrType, i32Type}, i32Type);
+    if (failed(func))
+      return failure();
+    int32_t mode = -1;
+    if (auto modeAttr = op.getMode())
+      mode = static_cast<int32_t>(*modeAttr);
+    auto modeValue = LLVM::ConstantOp::create(rewriter, op.getLoc(), i32Type,
+                                              rewriter.getI32IntegerAttr(mode));
+    rewriter.replaceOpWithNewOp<LLVM::CallOp>(
+        op, *func, ValueRange{adaptor.getFileName(), modeValue});
+    return success();
+  }
+};
+
 // Lowers `arc.dump_vars` to a call of the runtime library.
 struct DumpVarsOpLowering : public OpConversionPattern<arc::DumpVarsOp> {
   using OpConversionPattern::OpConversionPattern;
@@ -2173,6 +2232,7 @@ void LowerArcToLLVMPass::runOnOperation() {
     ConstantTimeOpLowering,
     CurrentTimeOpLowering,
     DumpVarsOpLowering,
+    SVFOpenOpLowering,
     SVReadMemOpLowering,
     GetNextWakeupOpLowering,
     IsTerminatedOpLowering,
@@ -2210,6 +2270,14 @@ void LowerArcToLLVMPass::runOnOperation() {
                PlusArgsValueOpLowering, SimEmitValueOpLowering,
                SimPrintFormattedProcOpLowering, StringConstantOpLowering>(
       converter, &getContext(), stringCache);
+  patterns.add<RuntimeCallLowering<sim::SVFCloseOp>>(
+      converter, &getContext(), runtime::APICallbacks::symNameFclose);
+  patterns.add<RuntimeCallLowering<sim::SVChannelToOutputStreamOp>>(
+      converter, &getContext(), runtime::APICallbacks::symNameGetFileStream);
+  patterns.add<RuntimeCallLowering<sim::FlushOp>>(
+      converter, &getContext(), runtime::APICallbacks::symNameFlushStream);
+  patterns.add<RuntimeCallLowering<sim::SVFFlushAllOp>>(
+      converter, &getContext(), runtime::APICallbacks::symNameFlushAll);
   patterns.add<SimStreamOpLowering<sim::StdoutStreamOp>>(
       converter, &getContext(), runtime::APICallbacks::symNameGetStdoutStream);
   patterns.add<SimStreamOpLowering<sim::StderrStreamOp>>(

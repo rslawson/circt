@@ -46,6 +46,11 @@ struct APICallbacks {
                     uint32_t wordBits, uint32_t wordStride, uint8_t isBinary,
                     uint8_t descending, int64_t lowAddress,
                     int64_t startAddress, int64_t finishAddress);
+  int32_t (*fnFopen)(const char *fileName, int32_t mode);
+  void (*fnFclose)(int32_t descriptor);
+  uint8_t *(*fnGetFileStream)(int32_t descriptor);
+  void (*fnFlushStream)(uint8_t *stream);
+  void (*fnFlushAll)();
 
   static constexpr char symNameAllocInstance[] = "arcRuntimeIR_allocInstance";
   static constexpr char symNameDeleteInstance[] = "arcRuntimeIR_deleteInstance";
@@ -64,6 +69,11 @@ struct APICallbacks {
   static constexpr char symNameTestPlusArgs[] = "arcRuntimeIR_testPlusArgs";
   static constexpr char symNameValuePlusArgs[] = "arcRuntimeIR_valuePlusArgs";
   static constexpr char symNameReadMem[] = "arcRuntimeIR_readMem";
+  static constexpr char symNameFopen[] = "arcRuntimeIR_fopen";
+  static constexpr char symNameFclose[] = "arcRuntimeIR_fclose";
+  static constexpr char symNameGetFileStream[] = "arcRuntimeIR_getFileStream";
+  static constexpr char symNameFlushStream[] = "arcRuntimeIR_flushStream";
+  static constexpr char symNameFlushAll[] = "arcRuntimeIR_flushAll";
 };
 
 #ifdef ARC_RUNTIME_JITBIND_FNDECL

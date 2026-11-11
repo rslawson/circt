@@ -24,6 +24,7 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -32,12 +33,14 @@
 #include "circt/Dialect/Arc/Runtime/JITBind.h"
 #endif
 
+#include <array>
 #include <cassert>
 #include <cctype>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -383,6 +386,114 @@ void arcRuntimeIR_readMem(const char *fileName, uint8_t *memory,
   }
 }
 
+// --- File I/O ---
+
+namespace {
+/// The files opened through `$fopen`. File descriptors have the most
+/// significant bit set, and index into `files` with the remaining bits, offset
+/// by the three predefined descriptors for stdin, stdout, and stderr.
+/// Multichannel descriptors have a bit set for each channel, where bit 0 is
+/// stdout and the remaining bits index into `channels`.
+struct FileTable {
+  std::vector<std::unique_ptr<llvm::raw_fd_ostream>> files;
+  std::array<std::unique_ptr<llvm::raw_fd_ostream>, 31> channels;
+};
+} // namespace
+
+static FileTable &getFileTable() {
+  static FileTable table;
+  return table;
+}
+
+static constexpr uint32_t kFileDescriptorBit = 0x80000000;
+static constexpr uint32_t kNumPredefinedFiles = 3;
+
+int32_t arcRuntimeIR_fopen(const char *fileName, int32_t mode) {
+  // Reading files is not supported.
+  if (mode == 0 || mode == 3)
+    return 0;
+  auto flags = llvm::sys::fs::OF_None;
+  if (mode == 2 || mode == 5)
+    flags = llvm::sys::fs::OF_Append;
+  std::error_code ec;
+  auto stream = std::make_unique<llvm::raw_fd_ostream>(fileName, ec, flags);
+  if (ec)
+    return 0;
+
+  auto &table = getFileTable();
+  if (mode < 0) {
+    // Allocate a channel of a multichannel descriptor.
+    for (unsigned i = 0; i < table.channels.size(); ++i) {
+      if (table.channels[i])
+        continue;
+      table.channels[i] = std::move(stream);
+      return 1 << (i + 1);
+    }
+    return 0;
+  }
+
+  // Allocate a file descriptor, reusing closed ones.
+  unsigned index = 0;
+  while (index < table.files.size() && table.files[index])
+    ++index;
+  if (index == table.files.size())
+    table.files.emplace_back();
+  table.files[index] = std::move(stream);
+  return kFileDescriptorBit | (index + kNumPredefinedFiles);
+}
+
+/// Get the stream slot of a descriptor, or null if the descriptor does not
+/// refer to a file opened through `arcRuntimeIR_fopen`.
+static std::unique_ptr<llvm::raw_fd_ostream> *getFileSlot(uint32_t descriptor) {
+  auto &table = getFileTable();
+  if (descriptor & kFileDescriptorBit) {
+    auto index = descriptor & ~kFileDescriptorBit;
+    if (index < kNumPredefinedFiles ||
+        index - kNumPredefinedFiles >= table.files.size())
+      return nullptr;
+    return &table.files[index - kNumPredefinedFiles];
+  }
+  for (unsigned i = 0; i < table.channels.size(); ++i)
+    if (descriptor & (1u << (i + 1)))
+      return &table.channels[i];
+  return nullptr;
+}
+
+void arcRuntimeIR_fclose(int32_t descriptor) {
+  if (auto *slot = getFileSlot(descriptor))
+    slot->reset();
+}
+
+uint8_t *arcRuntimeIR_getFileStream(int32_t descriptor) {
+  uint32_t desc = descriptor;
+  llvm::raw_ostream *stream = &llvm::nulls();
+  if (desc == (kFileDescriptorBit | 1) || desc == 1)
+    stream = &llvm::outs();
+  else if (desc == (kFileDescriptorBit | 2))
+    stream = &llvm::errs();
+  else if (!(desc & kFileDescriptorBit) && (desc & 1))
+    stream = &llvm::outs();
+  else if (auto *slot = getFileSlot(desc); slot && *slot)
+    stream = slot->get();
+  return reinterpret_cast<uint8_t *>(stream);
+}
+
+void arcRuntimeIR_flushStream(uint8_t *stream) {
+  reinterpret_cast<llvm::raw_ostream *>(stream)->flush();
+}
+
+void arcRuntimeIR_flushAll() {
+  llvm::outs().flush();
+  llvm::errs().flush();
+  auto &table = getFileTable();
+  for (auto &file : table.files)
+    if (file)
+      file->flush();
+  for (auto &file : table.channels)
+    if (file)
+      file->flush();
+}
+
 void arcRuntimeIR_dumpFile(uint8_t *modelState, const char *fileName) {
   auto *statePtr = arcRuntimeGetStateFromModelState(modelState, 0);
   getModelInstance(statePtr)->setDumpFile(fileName);
@@ -403,7 +514,10 @@ static const APICallbacks apiCallbacksGlobal{
     &arcRuntimeIR_getStdoutStream, &arcRuntimeIR_getStderrStream,
     &arcRuntimeIR_swapTraceBuffer, &arcRuntimeIR_dumpFile,
     &arcRuntimeIR_dumpVars,        &arcRuntimeIR_testPlusArgs,
-    &arcRuntimeIR_valuePlusArgs,   &arcRuntimeIR_readMem};
+    &arcRuntimeIR_valuePlusArgs,   &arcRuntimeIR_readMem,
+    &arcRuntimeIR_fopen,           &arcRuntimeIR_fclose,
+    &arcRuntimeIR_getFileStream,   &arcRuntimeIR_flushStream,
+    &arcRuntimeIR_flushAll};
 
 const APICallbacks &getArcRuntimeAPICallbacks() { return apiCallbacksGlobal; }
 

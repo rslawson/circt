@@ -388,6 +388,24 @@ func.func @ReadMem(%mem: !hw.array<4xi8>) -> !hw.array<4xi8> {
   return %0 : !hw.array<4xi8>
 }
 
+// CHECK-LABEL: llvm.func @FileIO
+func.func @FileIO(%fmt: !sim.fstring) {
+  // CHECK: %[[NAME:.*]] = llvm.mlir.addressof @{{.*}} : !llvm.ptr
+  // CHECK: %[[MODE:.*]] = llvm.mlir.constant(1 : i32) : i32
+  // CHECK: %[[FD:.*]] = llvm.call @arcRuntimeIR_fopen(%[[NAME]], %[[MODE]]) : (!llvm.ptr, i32) -> i32
+  %name = sim.string.literal "out.txt"
+  %fd = sim.sv.fopen %name mode = w
+  // CHECK: %[[STREAM:.*]] = llvm.call @arcRuntimeIR_getFileStream(%[[FD]]) : (i32) -> !llvm.ptr
+  %stream = sim.sv.channel_to_output_stream %fd
+  // CHECK: llvm.call @arcRuntimeIR_flushStream(%[[STREAM]]) : (!llvm.ptr) -> ()
+  sim.flush %stream
+  // CHECK: llvm.call @arcRuntimeIR_flushAll() : () -> ()
+  sim.sv.fflush_all
+  // CHECK: llvm.call @arcRuntimeIR_fclose(%[[FD]]) : (i32) -> ()
+  sim.sv.fclose %fd
+  return
+}
+
 // CHECK-LABEL: llvm.func @IsTerminated
 // CHECK-SAME: (%[[STATE:.*]]: !llvm.ptr)
 func.func @IsTerminated(%state: !arc.storage) -> i1 {

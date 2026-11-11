@@ -388,6 +388,21 @@ static void bindArcRuntimeSymbols(ExecutionEngine &executionEngine) {
     bindExecutionEngineSymbol(symbolMap, interner,
                               runtimeCallbacks.symNameReadMem,
                               runtimeCallbacks.fnReadMem);
+    bindExecutionEngineSymbol(symbolMap, interner,
+                              runtimeCallbacks.symNameFopen,
+                              runtimeCallbacks.fnFopen);
+    bindExecutionEngineSymbol(symbolMap, interner,
+                              runtimeCallbacks.symNameFclose,
+                              runtimeCallbacks.fnFclose);
+    bindExecutionEngineSymbol(symbolMap, interner,
+                              runtimeCallbacks.symNameGetFileStream,
+                              runtimeCallbacks.fnGetFileStream);
+    bindExecutionEngineSymbol(symbolMap, interner,
+                              runtimeCallbacks.symNameFlushStream,
+                              runtimeCallbacks.fnFlushStream);
+    bindExecutionEngineSymbol(symbolMap, interner,
+                              runtimeCallbacks.symNameFlushAll,
+                              runtimeCallbacks.fnFlushAll);
     return symbolMap;
   });
 }

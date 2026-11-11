@@ -163,6 +163,28 @@ ARC_IR_EXPORT void arcRuntimeIR_readMem(const char *fileName, uint8_t *memory,
                                         int64_t startAddress,
                                         int64_t finishAddress);
 
+/// Open a file for writing, following the `$fopen` system function. A `mode`
+/// of -1 opens the file as a multichannel descriptor. Modes 1, 2, 4, and 5
+/// correspond to "w", "a", "w+", and "a+", respectively. Files cannot be opened
+/// for reading. Returns the file or multichannel descriptor, or 0 on failure.
+ARC_IR_EXPORT int32_t arcRuntimeIR_fopen(const char *fileName, int32_t mode);
+
+/// Close a file or multichannel descriptor, following the `$fclose` system
+/// task.
+ARC_IR_EXPORT void arcRuntimeIR_fclose(int32_t descriptor);
+
+/// Get the output stream for a file or multichannel descriptor. Writing to a
+/// closed or invalid descriptor discards the output. For multichannel
+/// descriptors with more than one channel, only the lowest channel is used.
+ARC_IR_EXPORT uint8_t *arcRuntimeIR_getFileStream(int32_t descriptor);
+
+/// Flush an output stream.
+ARC_IR_EXPORT void arcRuntimeIR_flushStream(uint8_t *stream);
+
+/// Flush all open files, following the `$fflush` system task without
+/// arguments.
+ARC_IR_EXPORT void arcRuntimeIR_flushAll();
+
 /// Start tracing the model instance, beginning with its current state.
 /// Corresponds to the `$dumpvars` system task. Has no effect if tracing has
 /// already started.
