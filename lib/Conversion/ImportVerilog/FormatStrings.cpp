@@ -265,12 +265,18 @@ struct FormatStringParser {
     if (!value)
       return failure();
 
-    // Create an integer formatting fragment.
+    // Create an integer formatting fragment. Similar to the integer format
+    // specifiers, a `0` flag without a width (`%0t`) requests the minimum
+    // field width instead of zero padding.
     uint32_t width = 20; // default $timeformat field width
-    if (options.width)
-      width = *options.width;
-    auto alignment = options.leftJustify ? IntAlign::Left : IntAlign::Right;
     auto padding = options.zeroPad ? IntPadding::Zero : IntPadding::Space;
+    if (options.width) {
+      width = *options.width;
+    } else if (options.zeroPad) {
+      width = 0;
+      padding = IntPadding::Space;
+    }
+    auto alignment = options.leftJustify ? IntAlign::Left : IntAlign::Right;
     fragments.push_back(moore::FormatIntOp::create(
         builder, loc, value, IntFormat::Decimal, alignment, padding,
         builder.getI32IntegerAttr(width)));

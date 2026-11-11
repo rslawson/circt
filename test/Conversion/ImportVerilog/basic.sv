@@ -3719,7 +3719,7 @@ function void TimeFormat(time x);
   $display("%42t", x);
   // CHECK: moore.fmt.int decimal {{%.+}}, align left, pad space width 42
   $display("%-42t", x);
-  // CHECK: moore.fmt.int decimal {{%.+}}, align right, pad zero width 20
+  // CHECK: moore.fmt.int decimal {{%.+}}, align right, pad space width 0
   $display("%0t", x);
   // CHECK: moore.fmt.int decimal {{%.+}}, align right, pad zero width 0
   $display("%00t", x);
