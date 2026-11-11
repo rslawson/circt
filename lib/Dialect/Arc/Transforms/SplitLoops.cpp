@@ -412,6 +412,11 @@ LogicalResult SplitLoopsPass::ensureNoLoops() {
       if (auto dpiCallOp = dyn_cast<sim::DPICallOp>(def))
         if (dpiCallOp.getClock())
           continue;
+      // The results of a coroutine instance only change when the coroutine
+      // runs, and remain stable otherwise. Feeding them back into the
+      // coroutine does not create a zero-latency loop.
+      if (isa<CoroutineInstanceOp>(def))
+        continue;
       if (!seen.insert(def).second) {
         auto d = def->emitError(
             "loop splitting did not eliminate all loops; loop detected");

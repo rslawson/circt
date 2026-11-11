@@ -1429,9 +1429,32 @@ LogicalResult OpLowering::lower(CoroutineInstanceOp op) {
     StateWriteOp::create(module.builder, loc, wakeupSlot, wakeupEff);
     if (maskSlot)
       StateWriteOp::create(module.builder, loc, maskSlot, maskNew);
-    for (auto [index, slot] : llvm::enumerate(resultSlots))
-      StateWriteOp::create(module.builder, loc, slot,
-                           call.getResult(2 + index));
+
+    // Update the yielded values, and request a re-evaluation of the model if
+    // any of them changed.
+    Value anyResultChanged;
+    for (auto [index, slot] : llvm::enumerate(resultSlots)) {
+      auto newValue = call.getResult(2 + index);
+      auto oldValue = StateReadOp::create(module.builder, loc, slot);
+      StateWriteOp::create(module.builder, loc, slot, newValue);
+      if (!signals::hasBitRepresentation(newValue.getType()))
+        continue;
+      Value changed =
+          comb::ICmpOp::create(module.builder, loc, comb::ICmpPredicate::ne,
+                               signals::toBits(module.builder, loc, oldValue),
+                               signals::toBits(module.builder, loc, newValue));
+      anyResultChanged = anyResultChanged
+                             ? comb::OrOp::create(module.builder, loc,
+                                                  anyResultChanged, changed)
+                             : changed;
+    }
+    if (anyResultChanged) {
+      auto ifChangedOp =
+          scf::IfOp::create(module.builder, loc, anyResultChanged, false);
+      OpBuilder::InsertionGuard guard(module.builder);
+      module.builder.setInsertionPoint(ifChangedOp.thenYield());
+      module.requestDelta(module.builder, loc);
+    }
   }
 
   // Fold the coroutine's pending wakeup time into the model's wakeup schedule.
@@ -1956,24 +1979,16 @@ Value OpLowering::lowerValue(InstanceOp op, OpResult result, Phase phase) {
 }
 
 /// Handle the yielded values of a coroutine instance. The values are latched
-/// into a result slot by the instance lowering; reading the new value requires
-/// the instance to be lowered first so the slot has been written, while reading
-/// the old value observes the slot's contents before this evaluation's update.
+/// into a result slot by the instance lowering, and are read from the slot
+/// without ordering the read with respect to the instance. This allows
+/// coroutines to depend on their own results or the results of other
+/// coroutines that depend on them. Whenever the yielded values change, the
+/// instance requests a re-evaluation of the model in the same time step, such
+/// that all readers observe the new values eventually, akin to a delta cycle.
 Value OpLowering::lowerValue(CoroutineInstanceOp op, OpResult result,
                              Phase phase) {
-  if (initial) {
-    // The instance only ever runs in the new phase, where it writes the result
-    // slots. Make sure that has happened before we read them.
-    if (phase == Phase::New)
-      addPending(op, Phase::New);
+  if (initial)
     return {};
-  }
-
-  // If we want to read the old value, no writes must have been lowered yet.
-  if (phase == Phase::Old)
-    assert(!module.loweredOps.contains({op, Phase::New}) &&
-           "need old value but new value already written");
-
   auto state = module.getAllocatedState(result);
   return StateReadOp::create(module.getBuilder(phase), result.getLoc(), state);
 }

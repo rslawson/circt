@@ -1080,3 +1080,31 @@ hw.module @SignalTaps(in %v: i8) {
   llhd.assign %s, %v : i8
   hw.output
 }
+
+// Coroutine instances may use their own results. The results are read from
+// their slots without ordering constraints, and a change of the results
+// requests a re-evaluation of the model in the same time step.
+// CHECK-LABEL: arc.model @CoroutineSelfFeedback
+hw.module @CoroutineSelfFeedback(out o: i4) {
+  // CHECK: [[CTX:%.+]] = arc.as_context %arg0
+  // CHECK: [[RESULT:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i4>
+  // CHECK: [[ARG:%.+]] = arc.state_read [[RESULT]] : <i4>
+  // CHECK: scf.if
+  // CHECK:   {{%.+}}, {{%.+}}, [[RES:%.+]]:3 = arc.coroutine.call @SelfFeedbackCoroutine({{%.+}}, {{%.+}}, [[ARG]])
+  // CHECK:   [[OLD:%.+]] = arc.state_read [[RESULT]] : <i4>
+  // CHECK:   arc.state_write [[RESULT]] = [[RES]]#0 : <i4>
+  // CHECK:   [[CHANGED:%.+]] = comb.icmp ne [[OLD]], [[RES]]#0 : i4
+  // CHECK:   scf.if [[CHANGED]] {
+  // CHECK:     [[NOW:%.+]] = arc.current_time [[CTX]]
+  // CHECK:     arc.set_next_wakeup [[CTX]]
+  // CHECK:   }
+  // CHECK: }
+  %0 = arc.coroutine.instance @SelfFeedbackCoroutine(%0) sensitive [true] : (i4) -> i4
+  hw.output %0 : i4
+}
+
+arc.coroutine.define @SelfFeedbackCoroutine(%arg0: i4) -> (i4, i1, i64) {
+  %mask = hw.constant 1 : i1
+  %never = hw.constant -1 : i64
+  arc.coroutine.halt %arg0, %mask, %never : i4, i1, i64
+}
