@@ -31,6 +31,11 @@ using mlir::ConversionConfig;
 static bool isArcBreakingOp(Operation *op) {
   if (isa<TapOp>(op))
     return false;
+  // Ops producing references to signals, such as projections of a signal,
+  // have to remain in the module where LowerState can resolve them.
+  if (llvm::any_of(op->getResultTypes(),
+                   [](Type type) { return isa<llhd::RefType>(type); }))
+    return true;
   return op->hasTrait<OpTrait::ConstantLike>() ||
          isa<hw::InstanceOp, seq::CompRegOp, MemoryOp, MemoryReadPortOp,
              ClockedOpInterface, seq::InitialOp, seq::ClockGateOp,

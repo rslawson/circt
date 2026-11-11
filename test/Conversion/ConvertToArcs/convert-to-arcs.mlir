@@ -360,3 +360,17 @@ hw.module @ResetFromRegister(in %clock: !seq.clock, in %in: i1, in %rst: i1, out
   %data = seq.compreg %in, %clock reset %rst_d, %false : i1
   hw.output %data : i1
 }
+
+// Projections of signals remain in the module.
+// CHECK-LABEL: hw.module @SignalProjections
+hw.module @SignalProjections(in %v: i8, in %en: i1) {
+  %c0_i32 = hw.constant 0 : i32
+  %c0_i5 = hw.constant 0 : i5
+  // CHECK: [[SIG:%.+]] = llhd.sig
+  %s = llhd.sig %c0_i32 : <i32>
+  // CHECK-NOT: arc.call
+  // CHECK: [[PART:%.+]] = llhd.sig.extract [[SIG]] from %c0_i5 : <i32> -> <i8>
+  // CHECK: llhd.assign [[PART]], %v if %en : i8
+  %0 = llhd.sig.extract %s from %c0_i5 : <i32> -> <i8>
+  llhd.assign %0, %v if %en : i8
+}
