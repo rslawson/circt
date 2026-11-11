@@ -61,6 +61,7 @@
 #include "mlir/IR/Dominance.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SetVector.h"
@@ -327,9 +328,10 @@ void ProcessLowering::collectCaptures() {
 
   // Map an outside-defined value to a value usable inside the body by the
   // given user. Constants are cloned into the entry block. Projections into
-  // signals are cloned right before the user, such that their dynamic indices
-  // are re-evaluated with the coroutine argument values on every entry. Only
-  // the projected signal itself and dynamic indices have to be captured.
+  // signals and format strings are cloned right before the user, such that
+  // their operands are re-evaluated with the coroutine argument values on every
+  // entry. Only the projected signal itself and the operands have to be
+  // captured.
   std::function<Value(Value, Operation *)> capture =
       [&](Value value, Operation *user) -> Value {
     auto result = dyn_cast<OpResult>(value);
@@ -339,7 +341,14 @@ void ProcessLowering::collectCaptures() {
         cloned = entryBuilder.clone(*result.getOwner());
       return cloned->getResult(result.getResultNumber());
     }
-    if (result && signals::isProjection(result.getOwner())) {
+    // Format strings cannot be passed to coroutines. Clone the pure ops
+    // producing them before the user instead, which may happen if CSE merged
+    // a format string with an identical one outside the process.
+    bool isFormatString = result &&
+                          isa<sim::FormatStringType>(result.getType()) &&
+                          isPure(result.getOwner());
+    if (result &&
+        (isFormatString || signals::isProjection(result.getOwner()))) {
       auto *cloned = result.getOwner()->clone();
       OpBuilder(user).insert(cloned);
       for (auto &operand : cloned->getOpOperands())

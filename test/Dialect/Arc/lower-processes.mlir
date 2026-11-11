@@ -833,3 +833,25 @@ hw.module @CombinationalPure(in %a: i1, out x: i1) {
   }
   hw.output %0 : i1
 }
+
+// Format strings defined outside of a process are cloned into it, since they
+// cannot be passed to coroutines. Only their operands are captured.
+// CHECK-LABEL: arc.coroutine.define @FormatStringCapture.llhd.process
+// CHECK-SAME: (%arg0: i8)
+// CHECK:     ^bb1([[X:%.+]]: i8):
+// CHECK:       [[DEC:%.+]] = sim.fmt.dec [[X]] : i8
+// CHECK:       [[MSG:%.+]] = sim.fmt.concat ({{%.+}}, [[DEC]])
+// CHECK:       sim.proc.print [[MSG]]
+hw.module @FormatStringCapture(in %x: i8) {
+  %t = llhd.constant_time <1ns, 0d>
+  %l = sim.fmt.literal "x="
+  %d = sim.fmt.dec %x : i8
+  %m = sim.fmt.concat (%l, %d)
+  llhd.process {
+    llhd.wait delay %t, ^bb1
+  ^bb1:
+    sim.proc.print %m
+    llhd.halt
+  }
+  hw.output
+}
