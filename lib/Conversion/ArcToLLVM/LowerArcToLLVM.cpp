@@ -1262,6 +1262,28 @@ struct StringConstantOpLowering
   StringCache &stringCache;
 };
 
+// Lowers unclocked `sim.func.dpi.call` ops, such as those in processes, to a
+// call of the function implementing the DPI function.
+struct DPICallOpLowering : public OpConversionPattern<sim::DPICallOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(sim::DPICallOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (op.getClock() || op.getEnable())
+      return rewriter.notifyMatchFailure(op, "clocked or enabled DPI call");
+    SmallVector<Type> resultTypes;
+    if (failed(
+            getTypeConverter()->convertTypes(op.getResultTypes(), resultTypes)))
+      return failure();
+    if (resultTypes.size() > 1)
+      return rewriter.notifyMatchFailure(op, "multiple results");
+    rewriter.replaceOpWithNewOp<LLVM::CallOp>(op, resultTypes, op.getCallee(),
+                                              adaptor.getInputs());
+    return success();
+  }
+};
+
 // Lowers `sim.string.format_to_string` to a call of the runtime library, which
 // formats the arguments into a new string.
 struct FormatToStringOpLowering
@@ -2546,7 +2568,7 @@ void LowerArcToLLVMPass::runOnOperation() {
                SimPrintFormattedProcOpLowering, StringConstantOpLowering,
                FormatToStringOpLowering, StringConcatOpLowering>(
       converter, &getContext(), stringCache);
-  patterns.add<StringCmpOpLowering, IntToStringOpLowering,
+  patterns.add<DPICallOpLowering, StringCmpOpLowering, IntToStringOpLowering,
                StringToIntOpLowering, StringSubstrOpLowering,
                StringChangeCaseOpLowering<sim::StringToUpperOp, true>,
                StringChangeCaseOpLowering<sim::StringToLowerOp, false>>(
