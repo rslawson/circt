@@ -1204,3 +1204,23 @@ hw.module @StringSignals(in %en: i1) {
   // CHECK: sim.string.cmp ne [[OLD]], [[NEW]] : !sim.dstring
   hw.output
 }
+
+// Drives of coroutine results read the results after the coroutine executed in
+// the current evaluation, rather than the snapshot at the beginning of the
+// evaluation. This applies the drives in the same evaluation as the drives
+// performed by the coroutine itself.
+// CHECK-LABEL: arc.model @CoroutineResultDrive
+hw.module @CoroutineResultDrive(in %in: i42) {
+  // CHECK: [[SIG:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i42>
+  // CHECK: [[RES:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i42>
+  // CHECK: arc.coroutine.call @DummyCoroutine
+  // CHECK: arc.state_write [[RES]] = %results#0 : <i42>
+  // CHECK: }
+  // CHECK: [[FRESH:%.+]] = arc.state_read [[RES]] : <i42>
+  // CHECK: arc.state_write [[SIG]] = [[FRESH]] : <i42>
+  %c0_i42 = hw.constant 0 : i42
+  %s = llhd.sig %c0_i42 : <i42>
+  %0 = arc.coroutine.instance @DummyCoroutine(%in) sensitive [true] : (i42) -> i42
+  llhd.assign %s, %0 : i42
+  hw.output
+}
