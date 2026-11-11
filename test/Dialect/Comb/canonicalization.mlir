@@ -2567,3 +2567,15 @@ hw.module @narrowShlSingleBitExtractToICmp(in %s: i4, out o: i1) {
   %res = comb.extract %shl from 0 : (i8) -> i1
   hw.output %res : i1
 }
+
+// An extract that selects itself from a concatenation it feeds into must not be
+// replaced with itself.
+// CHECK-LABEL: hw.module @ExtractConcatSelfLoop
+// CHECK-NEXT:    [[CAT:%.+]] = comb.concat %a, [[EXT:%.+]] : i4, i4
+// CHECK-NEXT:    [[EXT]] = comb.extract [[CAT]] from 0 : (i8) -> i4
+// CHECK-NEXT:    hw.output [[EXT]] : i4
+hw.module @ExtractConcatSelfLoop(in %a: i4, out o: i4) {
+  %0 = comb.concat %a, %1 : i4, i4
+  %1 = comb.extract %0 from 0 : (i8) -> i4
+  hw.output %1 : i4
+}
