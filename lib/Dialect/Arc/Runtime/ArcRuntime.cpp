@@ -184,6 +184,16 @@ uint64_t *arcRuntimeIR_swapTraceBuffer(const uint8_t *modelState) {
   return getModelInstance(statePtr)->swapTraceBuffer();
 }
 
+void arcRuntimeIR_dumpFile(uint8_t *modelState, const char *fileName) {
+  auto *statePtr = arcRuntimeGetStateFromModelState(modelState, 0);
+  getModelInstance(statePtr)->setDumpFile(fileName);
+}
+
+void arcRuntimeIR_dumpVars(uint8_t *modelState) {
+  auto *statePtr = arcRuntimeGetStateFromModelState(modelState, 0);
+  getModelInstance(statePtr)->startDump(statePtr);
+}
+
 #ifdef ARC_RUNTIME_JIT_BIND
 namespace circt::arc::runtime {
 
@@ -192,7 +202,8 @@ static const APICallbacks apiCallbacksGlobal{
     &arcRuntimeIR_onEval,          &arcRuntimeIR_onInitialized,
     &arcRuntimeIR_format,          &arcRuntimeIR_formatToStream,
     &arcRuntimeIR_getStdoutStream, &arcRuntimeIR_getStderrStream,
-    &arcRuntimeIR_swapTraceBuffer};
+    &arcRuntimeIR_swapTraceBuffer, &arcRuntimeIR_dumpFile,
+    &arcRuntimeIR_dumpVars};
 
 const APICallbacks &getArcRuntimeAPICallbacks() { return apiCallbacksGlobal; }
 

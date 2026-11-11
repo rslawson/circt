@@ -45,6 +45,11 @@ public:
   void onInitialized(ArcState *mutableState);
   void onEval(ArcState *mutableState);
   uint64_t *swapTraceBuffer();
+  /// Set the name of the trace file written once `startDump` is called.
+  void setDumpFile(const char *fileName);
+  /// Start tracing the instance from its current state, unless tracing has
+  /// already been started by a previous call or through runtime arguments.
+  void startDump(ArcState *mutableState);
 
 private:
   // Runtime argument keys
@@ -80,6 +85,10 @@ private:
   std::unique_ptr<TraceEncoder> traceEncoder;
   bool verbose = false;
   uint64_t stepCounter = 0;
+  /// The trace file name set by `setDumpFile`, if any.
+  std::optional<std::string> dumpFile;
+  /// Whether `startDump` has been called.
+  bool dumpStarted = false;
 };
 
 } // namespace impl

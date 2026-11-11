@@ -35,7 +35,8 @@
 //   becomes an `arc.coroutine.halt` with an empty mask and the `-1` wakeup.
 //
 // - Lowers simulation control ops in the body that need access to the model
-//   context: `sim.terminate` and `sim.pause` become `arc.terminate`, and
+//   context: `sim.terminate` and `sim.pause` become `arc.terminate`,
+//   `sim.dump_file` and `sim.dump_vars` become their Arc equivalents, and
 //   `llhd.current_time` reads the time via `arc.current_time`. A
 //   `ub.unreachable` terminator, which typically follows a `sim.terminate`,
 //   becomes a halt that yields zero values.
@@ -426,7 +427,8 @@ void ProcessLowering::createCoroutine() {
 void ProcessLowering::lowerSimulationOps() {
   SmallVector<Operation *> ops;
   coroOp.walk([&](Operation *op) {
-    if (isa<sim::TerminateOp, sim::PauseOp, llhd::CurrentTimeOp>(op))
+    if (isa<sim::TerminateOp, sim::PauseOp, sim::DumpFileOp, sim::DumpVarsOp,
+            llhd::CurrentTimeOp>(op))
       ops.push_back(op);
   });
   for (auto *op : ops) {
@@ -438,6 +440,11 @@ void ProcessLowering::lowerSimulationOps() {
       // Non-interactive simulations terminate on `$stop`. Treat this as a
       // failure, similar to other simulators.
       TerminateOp::create(builder, loc, inferredContext, false);
+    } else if (auto dumpFileOp = dyn_cast<sim::DumpFileOp>(op)) {
+      DumpFileOp::create(builder, loc, inferredContext,
+                         dumpFileOp.getFilenameAttr());
+    } else if (isa<sim::DumpVarsOp>(op)) {
+      DumpVarsOp::create(builder, loc, inferredContext);
     } else if (auto timeOp = dyn_cast<llhd::CurrentTimeOp>(op)) {
       auto now = CurrentTimeOp::create(builder, loc, inferredContext);
       auto time = llhd::IntToTimeOp::create(builder, loc, now);

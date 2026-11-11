@@ -758,3 +758,21 @@ hw.module @CoroutineCalls(out x: i8) {
   }
   hw.output %0 : i8
 }
+
+//===----------------------------------------------------------------------===//
+// Value change dump ops are lowered to their Arc equivalents, which need access
+// to the model context.
+
+// CHECK-LABEL: arc.coroutine.define @DumpVars.llhd.process
+// CHECK:   [[CTX:%.+]] = arc.inferred_context
+// CHECK:   arc.dump_file [[CTX]], "waves.vcd"
+// CHECK:   arc.dump_vars [[CTX]]
+// CHECK-NOT: sim.dump
+hw.module @DumpVars() {
+  llhd.process {
+    sim.dump_file "waves.vcd"
+    sim.dump_vars
+    llhd.halt
+  }
+  hw.output
+}

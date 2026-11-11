@@ -363,6 +363,15 @@ func.func @NextWakeup(%arg0: !arc.context, %arg1: i64) {
   return
 }
 
+// CHECK-LABEL: func.func @DumpOps
+func.func @DumpOps(%arg0: !arc.context) {
+  // CHECK-NEXT: arc.dump_file %arg0, "waves.vcd"
+  arc.dump_file %arg0, "waves.vcd"
+  // CHECK-NEXT: arc.dump_vars %arg0
+  arc.dump_vars %arg0
+  return
+}
+
 // CHECK-LABEL: func.func @IsTerminated
 func.func @IsTerminated(%arg0: !arc.context) -> i1 {
   // CHECK-NEXT: arc.is_terminated %arg0

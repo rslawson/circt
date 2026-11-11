@@ -1084,6 +1084,52 @@ struct SimPrintFormattedProcOpLowering
   StringCache &stringCache;
 };
 
+// Lowers `arc.dump_file` to a call of the runtime library, passing the file
+// name as a global string constant.
+struct DumpFileOpLowering : public OpConversionPattern<arc::DumpFileOp> {
+  DumpFileOpLowering(const TypeConverter &typeConverter, MLIRContext *context,
+                     StringCache &stringCache)
+      : OpConversionPattern(typeConverter, context), stringCache(stringCache) {}
+
+  LogicalResult
+  matchAndRewrite(arc::DumpFileOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto moduleOp = op->getParentOfType<ModuleOp>();
+    auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+    auto func = LLVM::lookupOrCreateFn(
+        rewriter, moduleOp, runtime::APICallbacks::symNameDumpFile,
+        {ptrType, ptrType}, LLVM::LLVMVoidType::get(rewriter.getContext()));
+    if (failed(func))
+      return failure();
+    Value fileName = stringCache.getOrCreate(rewriter, op.getFilename());
+    rewriter.replaceOpWithNewOp<LLVM::CallOp>(
+        op, *func, ValueRange{adaptor.getArcContext(), fileName});
+    return success();
+  }
+
+  StringCache &stringCache;
+};
+
+// Lowers `arc.dump_vars` to a call of the runtime library.
+struct DumpVarsOpLowering : public OpConversionPattern<arc::DumpVarsOp> {
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(arc::DumpVarsOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto moduleOp = op->getParentOfType<ModuleOp>();
+    auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+    auto func = LLVM::lookupOrCreateFn(
+        rewriter, moduleOp, runtime::APICallbacks::symNameDumpVars, {ptrType},
+        LLVM::LLVMVoidType::get(rewriter.getContext()));
+    if (failed(func))
+      return failure();
+    rewriter.replaceOpWithNewOp<LLVM::CallOp>(
+        op, *func, ValueRange{adaptor.getArcContext()});
+    return success();
+  }
+};
+
 struct TerminateOpLowering : public OpConversionPattern<arc::TerminateOp> {
   using OpConversionPattern::OpConversionPattern;
 
@@ -1934,6 +1980,7 @@ void LowerArcToLLVMPass::runOnOperation() {
     ClockInvOpLowering,
     ConstantTimeOpLowering,
     CurrentTimeOpLowering,
+    DumpVarsOpLowering,
     GetNextWakeupOpLowering,
     IsTerminatedOpLowering,
     IntToTimeOpLowering,
@@ -1966,8 +2013,9 @@ void LowerArcToLLVMPass::runOnOperation() {
   patterns.add<ExecuteOp>(convert);
 
   StringCache stringCache;
-  patterns.add<SimEmitValueOpLowering, SimPrintFormattedProcOpLowering>(
-      converter, &getContext(), stringCache);
+  patterns.add<DumpFileOpLowering, SimEmitValueOpLowering,
+               SimPrintFormattedProcOpLowering>(converter, &getContext(),
+                                                stringCache);
   patterns.add<SimStreamOpLowering<sim::StdoutStreamOp>>(
       converter, &getContext(), runtime::APICallbacks::symNameGetStdoutStream);
   patterns.add<SimStreamOpLowering<sim::StderrStreamOp>>(

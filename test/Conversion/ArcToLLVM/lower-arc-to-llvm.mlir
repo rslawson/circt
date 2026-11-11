@@ -344,6 +344,18 @@ func.func @NextWakeup(%state: !arc.storage, %t: i64) -> i64 {
   return %0 : i64
 }
 
+// CHECK-LABEL: llvm.func @DumpOps
+// CHECK-SAME: (%[[STATE:.*]]: !llvm.ptr)
+func.func @DumpOps(%state: !arc.storage) {
+  %ctx = arc.as_context %state : !arc.storage
+  // CHECK-NEXT: %[[NAME:.*]] = llvm.mlir.addressof @{{.*}} : !llvm.ptr
+  // CHECK-NEXT: llvm.call @arcRuntimeIR_dumpFile(%[[STATE]], %[[NAME]]) : (!llvm.ptr, !llvm.ptr) -> ()
+  arc.dump_file %ctx, "waves.vcd"
+  // CHECK-NEXT: llvm.call @arcRuntimeIR_dumpVars(%[[STATE]]) : (!llvm.ptr) -> ()
+  arc.dump_vars %ctx
+  return
+}
+
 // CHECK-LABEL: llvm.func @IsTerminated
 // CHECK-SAME: (%[[STATE:.*]]: !llvm.ptr)
 func.func @IsTerminated(%state: !arc.storage) -> i1 {

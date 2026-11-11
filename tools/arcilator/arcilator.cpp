@@ -33,6 +33,7 @@
 #include "circt/Dialect/SV/SVDialect.h"
 #include "circt/Dialect/Seq/SeqPasses.h"
 #include "circt/Dialect/Sim/SimDialect.h"
+#include "circt/Dialect/Sim/SimOps.h"
 #include "circt/Dialect/Sim/SimPasses.h"
 #include "circt/Dialect/Verif/VerifDialect.h"
 #include "circt/Support/Passes.h"
@@ -365,6 +366,13 @@ static void bindArcRuntimeSymbols(ExecutionEngine &executionEngine) {
     bindExecutionEngineSymbol(symbolMap, interner,
                               runtimeCallbacks.symNameSwapTraceBuffer,
                               runtimeCallbacks.fnSwapTraceBuffer);
+    bindExecutionEngineSymbol(symbolMap, interner,
+                              runtimeCallbacks.symNameDumpFile,
+                              runtimeCallbacks.fnDumpFile);
+    bindExecutionEngineSymbol(symbolMap, interner,
+                              runtimeCallbacks.symNameDumpVars,
+                              runtimeCallbacks.fnDumpVars);
+
     return symbolMap;
   });
 }
@@ -372,7 +380,7 @@ static void bindArcRuntimeSymbols(ExecutionEngine &executionEngine) {
 
 /// Populate a pass manager with the arc simulator pipeline for the given
 /// command line options. This pipeline lowers modules to the Arc dialect.
-static void populateHwModuleToArcPipeline(PassManager &pm) {
+static void populateHwModuleToArcPipeline(PassManager &pm, bool hasDumpVars) {
   if (verbosePassExecutions)
     pm.addInstrumentation(
         std::make_unique<VerbosePassInstrumentation<mlir::ModuleOp>>(
@@ -384,7 +392,9 @@ static void populateHwModuleToArcPipeline(PassManager &pm) {
   if (untilReached(UntilPreprocessing))
     return;
 
-  bool hasTrace = !jitVcdFile.empty();
+  // Designs that start dumping their values themselves through `$dumpvars`
+  // need trace instrumentation as well.
+  bool hasTrace = !jitVcdFile.empty() || hasDumpVars;
 #ifdef CIRCT_LIBFST_ENABLED
   hasTrace = hasTrace || !jitFstFile.empty();
 #endif
@@ -485,7 +495,12 @@ static LogicalResult processBuffer(
   pmArc.enableTiming(ts);
   if (failed(applyPassManagerCLOptions(pmArc)))
     return failure();
-  populateHwModuleToArcPipeline(pmArc);
+  bool hasDumpVars = false;
+  module->walk([&](sim::DumpVarsOp op) {
+    hasDumpVars = true;
+    return WalkResult::interrupt();
+  });
+  populateHwModuleToArcPipeline(pmArc, hasDumpVars);
 
   if (failed(pmArc.run(module.get())))
     return failure();
