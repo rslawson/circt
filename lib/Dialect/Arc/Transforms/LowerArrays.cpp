@@ -495,11 +495,16 @@ void LowerArraysPass::runOnOperation() {
     return signalPassFailure();
   }
 
-  // Apply some cleanup patterns to optimize away ArrayRefAllocOps.
+  // Apply some cleanup patterns to optimize away ArrayRefAllocOps. Don't merge
+  // identical blocks, which would replace operands that differ between the
+  // blocks with block arguments, such as the format strings of prints that
+  // can only be lowered if they are known statically.
   RewritePatternSet cleanupPatterns(&getContext());
   cleanupPatterns.add<OptimizeReturnOfAlloc>(&getContext());
-  if (failed(
-          applyPatternsGreedily(getOperation(), std::move(cleanupPatterns)))) {
+  GreedyRewriteConfig cleanupConfig;
+  cleanupConfig.setRegionSimplificationLevel(GreedySimplifyRegionLevel::Normal);
+  if (failed(applyPatternsGreedily(getOperation(), std::move(cleanupPatterns),
+                                   cleanupConfig))) {
     return signalPassFailure();
   }
 }
