@@ -127,5 +127,15 @@ ARC_IR_EXPORT uint8_t *arcRuntimeIR_getStderrStream();
 /// trace buffer.
 ARC_IR_EXPORT uint64_t *arcRuntimeIR_swapTraceBuffer(const uint8_t *modelState);
 
+/// Set the name of the file that `arcRuntimeIR_dumpVars` writes the trace of
+/// the model instance to. Corresponds to the `$dumpfile` system task.
+ARC_IR_EXPORT void arcRuntimeIR_dumpFile(uint8_t *modelState,
+                                         const char *fileName);
+
+/// Start tracing the model instance, beginning with its current state.
+/// Corresponds to the `$dumpvars` system task. Has no effect if tracing has
+/// already started.
+ARC_IR_EXPORT void arcRuntimeIR_dumpVars(uint8_t *modelState);
+
 // NOLINTEND(readability-identifier-naming)
 #endif // CIRCT_DIALECT_ARC_RUNTIME_IRINTERFACE_H

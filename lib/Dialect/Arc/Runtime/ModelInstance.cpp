@@ -128,6 +128,54 @@ void ModelInstance::onEval(ArcState *mutableState) {
     traceEncoder->step(state);
 }
 
+void ModelInstance::setDumpFile(const char *fileName) {
+  dumpFile = std::string(fileName);
+}
+
+void ModelInstance::startDump(ArcState *mutableState) {
+  assert(mutableState == state);
+  if (dumpStarted)
+    return;
+  dumpStarted = true;
+
+  if (!modelInfo->traceInfo) {
+    std::cerr << "[ArcRuntime] WARNING: Dumping values has been requested but "
+                 "model \""
+              << getModelName()
+              << "\" contains no trace instrumentation. No trace will be "
+                 "produced."
+              << std::endl;
+    return;
+  }
+
+  // Tracing requested through the runtime arguments takes precedence.
+  if (traceMode != TraceMode::DUMMY)
+    return;
+
+  // Replace the dummy trace encoder with one that writes the trace file. The
+  // new encoder dumps the current state of the model first.
+  auto path = workDir / std::filesystem::path(dumpFile.value_or("dump.vcd"));
+  if (traceEncoder)
+    traceEncoder->finish(mutableState);
+  traceEncoder = {};
+  if (path.extension() == ".fst") {
+#ifdef CIRCT_LIBFST_ENABLED
+    traceEncoder = std::make_unique<FSTTraceEncoder>(modelInfo, mutableState,
+                                                     path, verbose);
+#else
+    std::cerr << "[ArcRuntime] WARNING: FST tracing was requested but CIRCT "
+                 "was not built with FST support (CIRCT_LIBFST_ENABLED=OFF). "
+                 "Writing a VCD trace instead."
+              << std::endl;
+    path.replace_extension(".vcd");
+#endif
+  }
+  if (!traceEncoder)
+    traceEncoder = std::make_unique<VCDTraceEncoder>(modelInfo, mutableState,
+                                                     path, verbose);
+  traceEncoder->run(mutableState);
+}
+
 void ModelInstance::onInitialized(ArcState *mutableState) {
   assert(mutableState == state);
   if (traceEncoder)

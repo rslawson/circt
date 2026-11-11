@@ -611,6 +611,34 @@ def TerminateOp : ArcOp<"terminate", [
   let assemblyFormat = [{ $arcContext `,` $success attr-dict }];
 }
 
+def DumpFileOp : ArcOp<"dump_file", [
+  MemoryEffects<[MemWrite]>
+]> {
+  let summary = "Set the name of the trace file";
+  let description = [{
+    Sets the name of the file that a subsequent `arc.dump_vars` writes the
+    trace of the model's observed values to. Requires the arcilator runtime
+    library, and corresponds to the `$dumpfile` system task in SystemVerilog.
+  }];
+  let arguments = (ins ContextType:$arcContext, StrAttr:$filename);
+  let assemblyFormat = [{ $arcContext `,` $filename attr-dict }];
+}
+
+def DumpVarsOp : ArcOp<"dump_vars", [
+  MemoryEffects<[MemWrite]>
+]> {
+  let summary = "Start tracing the model's observed values";
+  let description = [{
+    Starts writing a trace of the model's observed values to the file set by
+    `arc.dump_file`, beginning with the current values. Has no effect if
+    tracing has already started. Requires the arcilator runtime library and a
+    model compiled with trace instrumentation, and corresponds to the
+    `$dumpvars` system task in SystemVerilog.
+  }];
+  let arguments = (ins ContextType:$arcContext);
+  let assemblyFormat = [{ $arcContext attr-dict }];
+}
+
 def IsTerminatedOp : ArcOp<"is_terminated", [
   MemoryEffects<[MemRead]>
 ]> {
