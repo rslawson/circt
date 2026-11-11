@@ -10,6 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "ObservationUtils.h"
 #include "circt/Dialect/HW/HWOps.h"
 #include "circt/Dialect/LLHD/LLHDOps.h"
 #include "circt/Dialect/LLHD/LLHDPasses.h"
@@ -135,6 +136,20 @@ void Sig2RegPass::promote(SignalOp op) {
   // We can't promote conditional drives.
   if (drive && drive.getEnable()) {
     LLVM_DEBUG(llvm::dbgs() << "- Skipping " << op << " (conditional drive)\n");
+    ++numSkipped;
+    return;
+  }
+
+  // We can't promote signals if processes would observe the replacement value
+  // at multiple points in time, since CSE could then merge computations on
+  // the value. See `ObservationUtils.h`.
+  ObservationTracker tracker;
+  for (auto *user : op->getUsers())
+    if (auto probeOp = dyn_cast<ProbeOp>(user))
+      tracker.addUsers(probeOp);
+  if (tracker.observedAtMultipleTimes()) {
+    LLVM_DEBUG(llvm::dbgs()
+               << "- Skipping " << op << " (observed at multiple times)\n");
     ++numSkipped;
     return;
   }
