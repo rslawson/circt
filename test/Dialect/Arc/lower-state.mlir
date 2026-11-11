@@ -904,10 +904,10 @@ func.func private @ConsumeI8(i8)
 // CHECK-LABEL: arc.model @Signals
 hw.module @Signals(in %en: i1, in %v: i4, in %idx: i3) {
   // CHECK: [[CTX:%.+]] = arc.as_context %arg0
-  // CHECK-DAG: [[S:%.+]] = arc.alloc_state %arg0 {name = "s"} : (!arc.storage) -> !arc.state<i8>
-  // CHECK-DAG: [[NEXT:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i8>
-  // CHECK-DAG: [[MASK:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i8>
-  // CHECK-DAG: [[TIME:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i64>
+  // CHECK: [[S:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i8>
+  // CHECK: [[NEXT:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i8>
+  // CHECK: [[MASK:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i8>
+  // CHECK: [[TIME:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i64>
   // CHECK: arc.initial {
   // CHECK:   [[C42:%.+]] = hw.constant 42 : i8
   // CHECK:   arc.state_write [[S]] = [[C42]] : <i8>
@@ -987,7 +987,7 @@ hw.module @Signals(in %en: i1, in %v: i4, in %idx: i3) {
 // Probes and drives of aggregate signals operate on the entire signal value.
 // CHECK-LABEL: arc.model @AggregateSignals
 hw.module @AggregateSignals(in %idx: i1, in %v: i8, out o: i8) {
-  // CHECK: [[S:%.+]] = arc.alloc_state %arg0 {name = "s"} : (!arc.storage) -> !arc.state<!hw.struct<a: !hw.array<2xi8>>>
+  // CHECK: [[S:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<!hw.struct<a: !hw.array<2xi8>>>
   %s = llhd.sig : <!hw.struct<a: !hw.array<2xi8>>>
   %a = llhd.sig.struct_extract %s["a"] : <!hw.struct<a: !hw.array<2xi8>>>
   %e = llhd.sig.array_get %a[%idx] : <!hw.array<2xi8>>
@@ -1046,11 +1046,11 @@ arc.coroutine.define @SignalCoroutine(%s: !llhd.ref<i8>, %en: i1) -> (i2, i64) {
 
 // CHECK-LABEL: arc.model @SignalCoroutineInstance
 hw.module @SignalCoroutineInstance(in %en: i1) {
-  // CHECK-DAG: [[V:%.+]] = arc.alloc_state %arg0 {name = "s"} : (!arc.storage) -> !arc.state<i8>
-  // CHECK-DAG: [[NEXT:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i8>
-  // CHECK-DAG: [[MASK:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i8>
-  // CHECK-DAG: [[TIME:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i64>
-  // CHECK-DAG: [[PREV:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i8>
+  // CHECK: [[V:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i8>
+  // CHECK: [[NEXT:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i8>
+  // CHECK: [[MASK:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i8>
+  // CHECK: [[TIME:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i64>
+  // CHECK: [[PREV:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i8>
   // CHECK: [[CUR:%.+]] = arc.state_read [[V]] : <i8>
   // CHECK: [[EN:%.+]] = arc.state_read %in_en
   // CHECK: [[OLD:%.+]] = arc.state_read [[PREV]] : <i8>
@@ -1060,5 +1060,23 @@ hw.module @SignalCoroutineInstance(in %en: i1) {
   %c0_i8 = hw.constant 0 : i8
   %s = llhd.sig %c0_i8 : <i8>
   arc.coroutine.instance @SignalCoroutine(%s, %en) sensitive [true, false] : (!llhd.ref<i8>, i1) -> ()
+  hw.output
+}
+
+// Taps of signals are lowered after all drives of signals, such that they
+// observe the final value of the signal in the evaluation.
+// CHECK-LABEL: arc.model @SignalTaps
+hw.module @SignalTaps(in %v: i8) {
+  // CHECK-DAG: [[S:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i8>
+  // CHECK-DAG: [[TAP:%.+]] = arc.alloc_state %arg0 tap {names = ["s"]} : (!arc.storage) -> !arc.state<i8>
+  // CHECK: [[V:%.+]] = arc.state_read %in_v : <i8>
+  // CHECK: arc.state_write [[S]] = [[V]] : <i8>
+  // CHECK: [[P:%.+]] = arc.state_read [[S]] : <i8>
+  // CHECK: arc.state_write [[TAP]] = [[P]] : <i8>
+  %c0_i8 = hw.constant 0 : i8
+  %s = llhd.sig %c0_i8 : <i8>
+  %p = llhd.prb %s : i8
+  arc.tap %p {names = ["s"]} : i8
+  llhd.assign %s, %v : i8
   hw.output
 }

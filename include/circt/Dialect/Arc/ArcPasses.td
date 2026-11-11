@@ -14,7 +14,8 @@ include "mlir/Pass/PassBase.td"
 
 def AddTaps : Pass<"arc-add-taps", "mlir::ModuleOp"> {
   let summary = "Add taps to ports and wires such that they remain observable";
-  let dependentDialects = ["arc::ArcDialect", "seq::SeqDialect"];
+  let dependentDialects = ["arc::ArcDialect", "llhd::LLHDDialect",
+                           "seq::SeqDialect"];
   let options = [
     Option<"tapPorts", "ports", "bool", "true", "Make module ports observable">,
     Option<"tapWires", "wires", "bool", "true", "Make wires observable">,
