@@ -1424,3 +1424,44 @@ hw.module @ClockPosEdgeWithInseparableEffect(in %clock: i1) {
   %3 = llhd.sig : <i32>
   llhd.drv %3, %1 after %0 if %2 : i32
 }
+
+// Signals that are also driven by another process, or whose reference leaves
+// the module, would be overridden by the register. Such processes are kept.
+// CHECK-LABEL: @DrivenByOtherProcess(
+hw.module @DrivenByOtherProcess(in %clock: i1, in %d: i42, out s: !llhd.ref<i42>, out t: !llhd.ref<i42>) {
+  %c0_i42 = hw.constant 0 : i42
+  %0 = llhd.constant_time <0ns, 1d>
+  %s = llhd.sig %c0_i42 : <i42>
+  %t = llhd.sig %c0_i42 : <i42>
+  // CHECK: llhd.process -> i42, i1
+  %1, %2 = llhd.process -> i42, i1 {
+    %true = hw.constant true
+    %false = hw.constant false
+    cf.br ^bb1(%c0_i42, %false : i42, i1)
+  ^bb1(%3: i42, %4: i1):
+    llhd.wait yield (%3, %4 : i42, i1), (%clock : i1), ^bb2(%clock : i1)
+  ^bb2(%5: i1):
+    %6 = comb.xor bin %5, %true : i1
+    %7 = comb.and bin %6, %clock : i1
+    cf.cond_br %7, ^bb1(%d, %true : i42, i1), ^bb1(%c0_i42, %false : i42, i1)
+  }
+  llhd.drv %s, %1 after %0 if %2 : i42
+  llhd.process {
+    llhd.drv %s, %d after %0 : i42
+    llhd.halt
+  }
+  // CHECK: llhd.process -> i42, i1
+  %8, %9 = llhd.process -> i42, i1 {
+    %true = hw.constant true
+    %false = hw.constant false
+    cf.br ^bb1(%c0_i42, %false : i42, i1)
+  ^bb1(%3: i42, %4: i1):
+    llhd.wait yield (%3, %4 : i42, i1), (%clock : i1), ^bb2(%clock : i1)
+  ^bb2(%5: i1):
+    %6 = comb.xor bin %5, %true : i1
+    %7 = comb.and bin %6, %clock : i1
+    cf.cond_br %7, ^bb1(%d, %true : i42, i1), ^bb1(%c0_i42, %false : i42, i1)
+  }
+  llhd.drv %t, %8 after %0 if %9 : i42
+  hw.output %s, %t : !llhd.ref<i42>, !llhd.ref<i42>
+}

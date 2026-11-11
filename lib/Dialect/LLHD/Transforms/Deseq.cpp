@@ -362,6 +362,35 @@ LogicalResult Deseq::deseq() {
 
 /// Determine whether we can desequentialize the current process. Also gather
 /// the wait and drive ops that are relevant.
+/// Check whether the signal underlying a reference may be driven from within
+/// a process, through the reference itself or any projection of the signal.
+/// References passed to other modules, such as for hierarchical references
+/// into this module, may be driven by processes in those modules.
+static bool isDrivenByOtherProcess(Value ref) {
+  while (auto *defOp = ref.getDefiningOp()) {
+    if (!isa<SigExtractOp, SigArrayGetOp, SigArraySliceOp, SigStructExtractOp>(
+            defOp))
+      break;
+    ref = defOp->getOperand(0);
+  }
+  SmallVector<Value> worklist{ref};
+  while (!worklist.empty()) {
+    for (auto *user : worklist.pop_back_val().getUsers()) {
+      if (isa<SigExtractOp, SigArrayGetOp, SigArraySliceOp, SigStructExtractOp>(
+              user)) {
+        worklist.push_back(user->getResult(0));
+        continue;
+      }
+      if (isa<DriveLikeOp>(user) && (user->getParentOfType<ProcessOp>() ||
+                                     user->getParentOfType<FinalOp>()))
+        return true;
+      if (isa<hw::OutputOp, hw::InstanceOp>(user))
+        return true;
+    }
+  }
+  return false;
+}
+
 bool Deseq::analyzeProcess() {
   // We can only desequentialize processes with no side-effecting ops besides
   // the `WaitOp` or `HaltOp` terminators.
@@ -408,6 +437,15 @@ bool Deseq::analyzeProcess() {
                  << use.getOwner()->getLoc() << "\n");
       return false;
     }
+    // The registers created for the drive determine the signal's value at all
+    // times. Other processes driving the signal would be overridden.
+    if (isDrivenByOtherProcess(driveOp.getDriven())) {
+      LLVM_DEBUG(llvm::dbgs()
+                 << "Skipping " << process.getLoc() << ": drives signal "
+                 << "that is also driven by another process\n");
+      return false;
+    }
+
     // We can only deal with conditional drives.
     if (!driveOp.getEnable()) {
       LLVM_DEBUG(llvm::dbgs()
