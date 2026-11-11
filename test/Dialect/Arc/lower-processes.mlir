@@ -615,3 +615,43 @@ hw.module @ObserveResumeArg(in %a: i8) {
     llhd.halt
   }
 }
+
+//===----------------------------------------------------------------------===//
+// Simulation control ops that need access to the model context are lowered to
+// their Arc equivalents. `ub.unreachable` becomes a halt yielding zeros.
+
+// CHECK-LABEL: arc.coroutine.define @SimControl.llhd.process
+// CHECK-SAME: ([[A:%.+]]: i1) -> (i32, i1, i64)
+// CHECK:   [[CTX:%.+]] = arc.inferred_context
+// CHECK:   [[NOW:%.+]] = arc.current_time [[CTX]]
+// CHECK:   [[TIME:%.+]] = llhd.int_to_time [[NOW]]
+// CHECK:   [[TINT:%.+]] = llhd.time_to_int [[TIME]]
+// CHECK:   [[TRUNC:%.+]] = comb.extract [[TINT]] from 0 : (i64) -> i32
+// CHECK:   cf.cond_br [[A]], ^[[BB1:.+]], ^[[BB2:.+]]
+// CHECK: ^[[BB1]]:
+// CHECK:   arc.terminate [[CTX]], true
+// CHECK:   [[ZERO:%.+]] = hw.constant 0 : i32
+// CHECK:   arc.coroutine.halt [[ZERO]], {{%.+}}, {{%.+}} : i32, i1, i64
+// CHECK: ^[[BB2]]:
+// CHECK:   arc.terminate [[CTX]], false
+// CHECK:   arc.coroutine.halt [[TRUNC]], {{%.+}}, {{%.+}} : i32, i1, i64
+// CHECK-NOT: sim.terminate
+// CHECK-NOT: sim.pause
+// CHECK-NOT: llhd.current_time
+
+// CHECK-LABEL: hw.module @SimControl
+hw.module @SimControl(in %a: i1, out x: i32) {
+  %0 = llhd.process -> i32 {
+    %now = llhd.current_time
+    %nowInt = llhd.time_to_int %now
+    %trunc = comb.extract %nowInt from 0 : (i64) -> i32
+    cf.cond_br %a, ^bb1, ^bb2
+  ^bb1:
+    sim.terminate success, quiet
+    ub.unreachable
+  ^bb2:
+    sim.pause quiet
+    llhd.halt %trunc : i32
+  }
+  hw.output %0 : i32
+}
