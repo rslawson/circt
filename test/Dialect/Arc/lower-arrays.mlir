@@ -184,3 +184,25 @@ func.func @MultipleBlocks(%a: !hw.array<2xi8>, %b: !hw.array<2xi8>, %c: i1) -> !
 ^bb1(%x: !hw.array<2xi8>):
   return %x : !hw.array<2xi8>
 }
+
+// Identical blocks are not merged, which would turn the format strings of the
+// prints into block arguments.
+// CHECK-LABEL: func.func @DontMergeBlocks
+func.func @DontMergeBlocks(%arg0: i1) {
+  // CHECK: cf.cond_br %arg0, ^[[BB1:.+]], ^[[BB2:.+]]
+  // CHECK: ^[[BB1]]:
+  // CHECK:   sim.proc.print [[A:%.+]]
+  // CHECK: ^[[BB2]]:
+  // CHECK:   sim.proc.print [[B:%.+]]
+  %a = sim.fmt.literal "a"
+  %b = sim.fmt.literal "b"
+  cf.cond_br %arg0, ^bb1, ^bb2
+^bb1:
+  sim.proc.print %a
+  cf.br ^bb3
+^bb2:
+  sim.proc.print %b
+  cf.br ^bb3
+^bb3:
+  return
+}
