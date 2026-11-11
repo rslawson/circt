@@ -73,6 +73,11 @@ ARC_RUNTIME_EXPORT void arcRuntimeOnInitialized(struct ArcState *instance);
 /// Return the API version of the runtime library.
 ARC_RUNTIME_EXPORT uint64_t arcRuntimeGetAPIVersion();
 
+/// Check whether any model instance requested a termination of the simulation
+/// with failure, for example through `$fatal`, before it was deleted. Returns
+/// 1 if so, and 0 otherwise.
+ARC_RUNTIME_EXPORT uint8_t arcRuntimeSimulationFailed();
+
 /// Set the command line arguments of the simulation, which are queried by the
 /// `$test$plusargs` and `$value$plusargs` system functions. Only arguments
 /// starting with `+` are considered.

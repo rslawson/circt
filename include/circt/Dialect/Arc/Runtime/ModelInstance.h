@@ -42,6 +42,10 @@ public:
     return !!modelInfo->modelName ? modelInfo->modelName : "<NULL>";
   }
 
+  /// Whether any instance requested termination with failure before it was
+  /// deleted.
+  static bool simulationFailed;
+
   void onInitialized(ArcState *mutableState);
   void onEval(ArcState *mutableState);
   uint64_t *swapTraceBuffer();

@@ -200,6 +200,10 @@ static std::vector<std::string> &getPlusArgs() {
   return plusArgs;
 }
 
+uint8_t arcRuntimeSimulationFailed() {
+  return impl::ModelInstance::simulationFailed;
+}
+
 void arcRuntimeSetPlusArgs(int numArgs, const char *const *args) {
   auto &plusArgs = getPlusArgs();
   plusArgs.clear();

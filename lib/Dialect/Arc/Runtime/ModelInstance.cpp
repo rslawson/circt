@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "circt/Dialect/Arc/Runtime/ModelInstance.h"
+#include "circt/Dialect/Arc/ArcConstants.h"
 
 #include "circt/Dialect/Arc/Runtime/TraceTaps.h"
 #include "circt/Dialect/Arc/Runtime/VCDTraceEncoder.h"
@@ -100,7 +101,12 @@ ModelInstance::~ModelInstance() {
   assert(state->impl == static_cast<void *>(this) && "Inconsistent ArcState");
   if (traceEncoder)
     traceEncoder->finish(state);
+  // Remember if the instance requested termination with failure.
+  if (state->modelState[kTerminateFlagOffset] == 2)
+    simulationFailed = true;
 }
+
+bool ModelInstance::simulationFailed = false;
 
 std::filesystem::path
 ModelInstance::getTraceFilePath(const std::string &suffix) {
