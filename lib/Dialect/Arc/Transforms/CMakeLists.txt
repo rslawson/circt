@@ -28,6 +28,7 @@ add_circt_dialect_library(CIRCTArcTransforms
   PrintCostModel.cpp
   RemoveI0Types.cpp
   ResolveXMRRef.cpp
+  SignalUtils.cpp
   SimplifyVariadicOps.cpp
   SplitFuncs.cpp
   SplitLoops.cpp

@@ -894,3 +894,118 @@ arc.coroutine.define @DummyCoroutine(%arg: i42) -> (i42, i1, i64) {
   %never = hw.constant -1 : i64
   arc.coroutine.halt %arg, %false, %never : i42, i1, i64
 }
+
+func.func private @ConsumeI8(i8)
+
+// Signals are allocated as states and initialized in the initial phase. Probes
+// read the state. Drives are deferred to the end of the model and request a
+// re-evaluation in the same time step if they change the signal's value.
+// Delayed drives update shadow storage which is applied once its time is due.
+// CHECK-LABEL: arc.model @Signals
+hw.module @Signals(in %en: i1, in %v: i4, in %idx: i3) {
+  // CHECK: [[CTX:%.+]] = arc.as_context %arg0
+  // CHECK-DAG: [[S:%.+]] = arc.alloc_state %arg0 {name = "s"} : (!arc.storage) -> !arc.state<i8>
+  // CHECK-DAG: [[NEXT:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i8>
+  // CHECK-DAG: [[MASK:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i8>
+  // CHECK-DAG: [[TIME:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i64>
+  // CHECK: arc.initial {
+  // CHECK:   [[C42:%.+]] = hw.constant 42 : i8
+  // CHECK:   arc.state_write [[S]] = [[C42]] : <i8>
+  // CHECK: }
+  %c42 = hw.constant 42 : i8
+  %s = llhd.sig %c42 : <i8>
+
+  // CHECK: [[P:%.+]] = arc.state_read [[S]] : <i8>
+  // CHECK: func.call @ConsumeI8([[P]])
+  %p = llhd.prb %s : i8
+  func.call @ConsumeI8(%p) : (i8) -> ()
+
+  // Immediate drive with enable.
+  // CHECK: [[EN:%.+]] = arc.state_read %in_en
+  // CHECK: scf.if [[EN]] {
+  // CHECK:   [[OLD:%.+]] = arc.state_read [[S]] : <i8>
+  // CHECK:   arc.state_write [[S]] = [[P]] : <i8>
+  // CHECK:   [[CHANGED:%.+]] = comb.icmp ne [[OLD]], [[P]] : i8
+  // CHECK:   scf.if [[CHANGED]] {
+  // CHECK:     [[NOW:%.+]] = arc.current_time [[CTX]]
+  // CHECK:     [[NW:%.+]] = arc.get_next_wakeup [[CTX]]
+  // CHECK:     [[MIN:%.+]] = arith.minui [[NW]], [[NOW]] : i64
+  // CHECK:     arc.set_next_wakeup [[CTX]], [[MIN]]
+  // CHECK:   }
+  // CHECK: }
+  llhd.assign %s, %p if %en : i8
+
+  // Delayed drive of a part of the signal.
+  // CHECK: [[IDX:%.+]] = arc.state_read %in_idx
+  // CHECK: [[V:%.+]] = arc.state_read %in_v
+  // CHECK: [[DELAY:%.+]] = hw.constant 0 : i64
+  // CHECK: [[OLDNEXT:%.+]] = arc.state_read [[NEXT]] : <i8>
+  // CHECK: [[NEWNEXT:%.+]] = comb.or
+  // CHECK: arc.state_write [[NEXT]] = [[NEWNEXT]] : <i8>
+  // CHECK: [[PARTMASK:%.+]] = comb.or
+  // CHECK: [[OLDMASK:%.+]] = arc.state_read [[MASK]] : <i8>
+  // CHECK: [[NEWMASK:%.+]] = comb.or [[OLDMASK]], [[PARTMASK]] : i8
+  // CHECK: arc.state_write [[MASK]] = [[NEWMASK]] : <i8>
+  // CHECK: [[NOW:%.+]] = arc.current_time [[CTX]]
+  // CHECK: [[DUE:%.+]] = comb.add [[NOW]], [[DELAY]] : i64
+  // CHECK: arc.state_write [[TIME]] = [[DUE]] : <i64>
+  %part = llhd.sig.extract %s from %idx : <i8> -> <i4>
+  %delta = llhd.constant_time <0ns, 1d>
+  llhd.drv %part, %v after %delta : i4
+
+  // Pending updates are applied at the end of the model.
+  // CHECK: [[M:%.+]] = arc.state_read [[MASK]] : <i8>
+  // CHECK: [[ZERO:%.+]] = hw.constant 0 : i8
+  // CHECK: [[PENDING:%.+]] = comb.icmp ne [[M]], [[ZERO]] : i8
+  // CHECK: scf.if [[PENDING]] {
+  // CHECK:   [[NOW:%.+]] = arc.current_time [[CTX]]
+  // CHECK:   [[T:%.+]] = arc.state_read [[TIME]] : <i64>
+  // CHECK:   [[ISDUE:%.+]] = comb.icmp uge [[NOW]], [[T]] : i64
+  // CHECK:   scf.if [[ISDUE]] {
+  // CHECK:     [[CUR:%.+]] = arc.state_read [[S]] : <i8>
+  // CHECK:     [[NV:%.+]] = arc.state_read [[NEXT]] : <i8>
+  // CHECK:     [[ONES:%.+]] = hw.constant -1 : i8
+  // CHECK:     [[INV:%.+]] = comb.xor [[M]], [[ONES]] : i8
+  // CHECK:     [[KEPT:%.+]] = comb.and [[CUR]], [[INV]] : i8
+  // CHECK:     [[NEWBITS:%.+]] = comb.and [[NV]], [[M]] : i8
+  // CHECK:     [[UPD:%.+]] = comb.or [[KEPT]], [[NEWBITS]] : i8
+  // CHECK:     arc.state_write [[S]] = [[UPD]] : <i8>
+  // CHECK:     arc.state_write [[MASK]] = [[ZERO]] : <i8>
+  // CHECK:     [[CHG:%.+]] = comb.icmp ne [[CUR]], [[UPD]] : i8
+  // CHECK:     scf.if [[CHG]] {
+  // CHECK:       arc.set_next_wakeup
+  // CHECK:     }
+  // CHECK:   } else {
+  // CHECK:     [[NW:%.+]] = arc.get_next_wakeup [[CTX]]
+  // CHECK:     [[MIN:%.+]] = arith.minui [[NW]], [[T]] : i64
+  // CHECK:     arc.set_next_wakeup [[CTX]], [[MIN]]
+  // CHECK:   }
+  // CHECK: }
+  hw.output
+}
+
+// Probes and drives of aggregate signals operate on the entire signal value.
+// CHECK-LABEL: arc.model @AggregateSignals
+hw.module @AggregateSignals(in %idx: i1, in %v: i8, out o: i8) {
+  // CHECK: [[S:%.+]] = arc.alloc_state %arg0 {name = "s"} : (!arc.storage) -> !arc.state<!hw.struct<a: !hw.array<2xi8>>>
+  %s = llhd.sig : <!hw.struct<a: !hw.array<2xi8>>>
+  %a = llhd.sig.struct_extract %s["a"] : <!hw.struct<a: !hw.array<2xi8>>>
+  %e = llhd.sig.array_get %a[%idx] : <!hw.array<2xi8>>
+  // CHECK: [[IDX:%.+]] = arc.state_read %in_idx
+  // CHECK: [[SV:%.+]] = arc.state_read [[S]]
+  // CHECK: [[AV:%.+]] = hw.struct_extract [[SV]]["a"]
+  // CHECK: [[EV:%.+]] = hw.array_get [[AV]][[[IDX]]]
+  %p = llhd.prb %e : i8
+  // CHECK: [[IDX2:%.+]] = arc.state_read %in_idx
+  // CHECK: [[V:%.+]] = arc.state_read %in_v
+  // CHECK: [[OLD:%.+]] = arc.state_read [[S]]
+  // CHECK: [[OLDA:%.+]] = hw.struct_extract [[OLD]]["a"]
+  // CHECK: [[OLDE:%.+]] = hw.array_get [[OLDA]][[[IDX2]]]
+  // CHECK: [[OLDA2:%.+]] = hw.struct_extract [[OLD]]["a"]
+  // CHECK: [[NEWA:%.+]] = hw.array_inject [[OLDA2]][[[IDX2]]], [[V]] :
+  // CHECK: [[NEW:%.+]] = hw.struct_inject [[OLD]]["a"], [[NEWA]]
+  // CHECK: arc.state_write [[S]] = [[NEW]]
+  // CHECK: comb.icmp ne [[OLDE]], [[V]] : i8
+  llhd.assign %e, %v : i8
+  hw.output %p : i8
+}

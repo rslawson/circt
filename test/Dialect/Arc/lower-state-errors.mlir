@@ -16,3 +16,14 @@ hw.module @CombLoop(in %a: i42, out z: i42) {
 hw.module.extern @myModule()
 
 hw.instance "alligator" @myModule() -> ()
+
+// -----
+
+func.func private @GetRef() -> !llhd.ref<i42>
+
+hw.module @UnsupportedRef(in %v: i42) {
+  // expected-error @below {{unsupported reference; must be derived from an `llhd.sig`}}
+  %a = func.call @GetRef() : () -> !llhd.ref<i42>
+  // expected-remark @below {{computing new phase here}}
+  llhd.assign %a, %v : i42
+}
