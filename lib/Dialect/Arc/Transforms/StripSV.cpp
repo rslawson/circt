@@ -33,10 +33,56 @@ namespace {
 struct StripSVPass : public arc::impl::StripSVBase<StripSVPass> {
   using Base::Base;
   void runOnOperation() override;
+  Value getAsyncResetOverride(OpBuilder &builder, Location loc, Value clock,
+                              Value reset);
   SmallVector<Operation *> opsToDelete;
   SmallPtrSet<StringAttr, 4> clockGateModuleNames;
+
+  /// A register toggling on every assertion of an asynchronous reset.
+  DenseMap<Value, Value> resetToggles;
+  /// The condition under which registers with an asynchronous reset are forced
+  /// to their reset value, for each pair of clock and reset.
+  DenseMap<std::pair<Value, Value>, Value> resetOverrides;
 };
 } // namespace
+
+/// Get a condition that indicates whether a register clocked by `clock` with
+/// the asynchronous reset `reset` should be forced to its reset value. This is
+/// the case while the reset is asserted, and after an assertion of the reset
+/// until the next clock edge.
+///
+/// A toggle register clocked by the reset flips its value on every assertion
+/// of the reset. A register clocked by `clock` samples the toggle register on
+/// every clock edge. The two differ if the reset has been asserted since the
+/// last clock edge.
+Value StripSVPass::getAsyncResetOverride(OpBuilder &builder, Location loc,
+                                         Value clock, Value reset) {
+  auto &override = resetOverrides[{clock, reset}];
+  if (override)
+    return override;
+
+  auto i1Type = builder.getI1Type();
+  auto zeroInit = [&] {
+    return seq::createConstantInitialValue(builder, loc,
+                                           builder.getBoolAttr(false));
+  };
+  auto &toggle = resetToggles[reset];
+  if (!toggle) {
+    auto resetClock = seq::ToClockOp::create(builder, loc, reset);
+    auto toggleReg = seq::CompRegOp::create(
+        builder, loc, i1Type, reset, resetClock, StringAttr{}, Value{}, Value{},
+        zeroInit(), hw::InnerSymAttr{});
+    toggleReg.getInputMutable().assign(
+        comb::createOrFoldNot(builder, loc, toggleReg, true));
+    toggle = toggleReg;
+  }
+  auto sampled =
+      seq::CompRegOp::create(builder, loc, i1Type, toggle, clock, StringAttr{},
+                             Value{}, Value{}, zeroInit(), hw::InnerSymAttr{});
+  auto pending = comb::XorOp::create(builder, loc, toggle, sampled, true);
+  override = comb::OrOp::create(builder, loc, reset, pending, true);
+  return override;
+}
 
 void StripSVPass::runOnOperation() {
   auto mlirModule = getOperation();
@@ -116,6 +162,8 @@ void StripSVPass::runOnOperation() {
   });
 
   for (auto module : mlirModule.getOps<hw::HWModuleOp>()) {
+    resetToggles.clear();
+    resetOverrides.clear();
     for (Operation &op : *module.getBodyBlock()) {
       // Remove ifdefs and verbatim.
       if (isa<sv::IfDefOp, sv::CoverOp, sv::CoverConcurrentOp>(&op)) {
@@ -154,11 +202,6 @@ void StripSVPass::runOnOperation() {
       if (auto reg = dyn_cast<seq::FirRegOp>(&op)) {
         OpBuilder builder(reg);
 
-        if (reg.getIsAsync() && !asyncResetsAsSync) {
-          reg.emitOpError("only synchronous resets are currently supported");
-          return signalPassFailure();
-        }
-
         Value presetValue;
         // Materialize initial value, assume zero initialization as default.
         if (reg.getPreset() && !reg.getPreset()->isZero()) {
@@ -173,6 +216,19 @@ void StripSVPass::runOnOperation() {
             builder, reg.getLoc(), reg.getType(), reg.getNext(), reg.getClk(),
             reg.getNameAttr(), reg.getReset(), reg.getResetValue(),
             /*initialValue*/ presetValue, reg.getInnerSymAttr());
+
+        // Registers with an asynchronous reset take on their reset value as
+        // soon as the reset is asserted, and keep it until the first clock
+        // edge after the reset is released. Model this by overriding the
+        // value of the register while the reset is asserted or an assertion
+        // of the reset has not been followed by a clock edge yet. The
+        // register itself is reset synchronously.
+        if (reg.getIsAsync() && !asyncResetsAsSync) {
+          auto override = getAsyncResetOverride(builder, reg.getLoc(),
+                                                reg.getClk(), reg.getReset());
+          compReg = comb::MuxOp::create(builder, reg.getLoc(), override,
+                                        reg.getResetValue(), compReg);
+        }
         reg.replaceAllUsesWith(compReg);
         opsToDelete.push_back(reg);
         continue;
