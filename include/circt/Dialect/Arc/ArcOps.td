@@ -611,6 +611,20 @@ def TerminateOp : ArcOp<"terminate", [
   let assemblyFormat = [{ $arcContext `,` $success attr-dict }];
 }
 
+def IsTerminatedOp : ArcOp<"is_terminated", [
+  MemoryEffects<[MemRead]>
+]> {
+  let summary = "Check whether simulation termination has been requested";
+  let description = [{
+    Reads the termination flag from the model's context, which is set by
+    `arc.terminate`. Returns true if termination has been requested, regardless
+    of whether the simulation is supposed to terminate with success or failure.
+  }];
+  let arguments = (ins ContextType:$arcContext);
+  let results = (outs I1:$terminated);
+  let assemblyFormat = [{ $arcContext attr-dict }];
+}
+
 def GetNextWakeupOp : ArcOp<"get_next_wakeup", [
   MemoryEffects<[MemRead]>
 ]> {

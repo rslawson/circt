@@ -234,8 +234,9 @@ def GenerateDriver : Pass<"arc-generate-driver", "mlir::ModuleOp"> {
     Emit a `func.func @<model>_main` for every `arc.model` that instantiates the
     model and drives it forward in time until no more events are scheduled: it
     repeatedly advances simulation time to the next scheduled wakeup and
-    evaluates the model until no further wakeup is pending. This lets a model be
-    run directly through the arcilator JIT without a hand-written driver loop.
+    evaluates the model until no further wakeup is pending or the model has
+    requested termination through `arc.terminate`. This lets a model be run
+    directly through the arcilator JIT without a hand-written driver loop.
   }];
   let dependentDialects = [
     "arc::ArcDialect",

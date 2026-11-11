@@ -77,8 +77,9 @@ void GenerateDriverPass::generateDriver(ModelOp modelOp,
   auto instance = instanceBlock->addArgument(instanceType, loc);
   auto arcContext = AsContextOp::create(builder, loc, instance);
 
-  // Loop until no further wakeup is scheduled. The next wakeup slot uses
-  // `UINT64_MAX` to signal that the model has gone quiescent.
+  // Loop until no further wakeup is scheduled or termination has been
+  // requested. The next wakeup slot uses `UINT64_MAX` to signal that the model
+  // has gone quiescent.
   auto never = arith::ConstantOp::create(builder, loc,
                                          builder.getIntegerAttr(i64Type, -1));
   auto firstWakeup = GetNextWakeupOp::create(builder, loc, arcContext);
@@ -86,13 +87,19 @@ void GenerateDriverPass::generateDriver(ModelOp modelOp,
   auto whileOp =
       scf::WhileOp::create(builder, loc, i64Type, ValueRange{firstWakeup});
 
-  // The "before" region tests whether a wakeup is still pending and forwards
-  // the wakeup time into the loop body.
+  // The "before" region tests whether a wakeup is still pending and the
+  // simulation has not requested termination, and forwards the wakeup time
+  // into the loop body.
   auto *beforeBlock = builder.createBlock(&whileOp.getBefore());
   auto wakeup = beforeBlock->addArgument(i64Type, loc);
   auto pending = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::ne,
                                        wakeup, never);
-  scf::ConditionOp::create(builder, loc, pending, ValueRange{wakeup});
+  auto terminated = IsTerminatedOp::create(builder, loc, arcContext);
+  auto running = arith::CmpIOp::create(
+      builder, loc, arith::CmpIPredicate::eq, terminated,
+      arith::ConstantOp::create(builder, loc, builder.getBoolAttr(false)));
+  auto proceed = arith::AndIOp::create(builder, loc, pending, running);
+  scf::ConditionOp::create(builder, loc, proceed, ValueRange{wakeup});
 
   // The "after" region advances time to the scheduled wakeup, evaluates the
   // model, and reads the next wakeup time to feed back into the condition.
