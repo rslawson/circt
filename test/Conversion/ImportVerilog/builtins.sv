@@ -1195,7 +1195,13 @@ function void PlusArgsBuiltins();
   rv = $test$plusargs("FOO");
 
   // CHECK: [[FOUND:%.+]], [[RESULT:%.+]] = moore.builtin.plusargs_value "BAR=%d" : i1, i32
-  // CHECK: moore.blocking_assign {{%.+}}, [[RESULT]] : i32
+  // CHECK: [[OLD:%.+]] = moore.read [[VAL:%.+]] : ref<i32>
+  // CHECK: [[NEW:%.+]] = moore.conditional [[FOUND]] : i1 -> i32 {
+  // CHECK:   moore.yield [[RESULT]] : i32
+  // CHECK: } {
+  // CHECK:   moore.yield [[OLD]] : i32
+  // CHECK: }
+  // CHECK: moore.blocking_assign [[VAL]], [[NEW]] : i32
   rv = $value$plusargs("BAR=%d", val);
 endfunction
 
