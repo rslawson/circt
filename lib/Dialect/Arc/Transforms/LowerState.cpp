@@ -193,10 +193,15 @@ struct ModuleLowering {
   /// previous if ops for the same reset value.
   std::pair<Value, Value> prevReset;
 
-  ModuleLowering(HWModuleOp moduleOp, SymbolTable &symbolTable)
+  /// The coroutines whose signal reference arguments have already been
+  /// lowered. Shared across all modules.
+  DenseSet<Operation *> &loweredCoroutines;
+
+  ModuleLowering(HWModuleOp moduleOp, SymbolTable &symbolTable,
+                 DenseSet<Operation *> &loweredCoroutines)
       : moduleOp(moduleOp), builder(moduleOp), allocBuilder(moduleOp),
         initialBuilder(moduleOp), finalBuilder(moduleOp),
-        symbolTable(symbolTable) {}
+        symbolTable(symbolTable), loweredCoroutines(loweredCoroutines) {}
   LogicalResult run();
   LogicalResult lowerOp(Operation *op);
   Value getAllocatedState(OpResult result);
@@ -207,12 +212,31 @@ struct ModuleLowering {
   void allocateSignalShadow(llhd::SignalOp op);
   void requestDelta(OpBuilder &builder, Location loc);
   LogicalResult lowerPendingSignalUpdates();
+  LogicalResult lowerCoroutineSignals(CoroutineDefineOp defineOp);
 };
 } // namespace
 
 //===----------------------------------------------------------------------===//
 // Module Lowering
 //===----------------------------------------------------------------------===//
+
+/// Convert a constant time to an integer number of femtoseconds. Returns
+/// `std::nullopt` if the unit is unsupported or the time does not fit into 64
+/// bits. The delta and epsilon components are ignored.
+static std::optional<uint64_t> getTimeInFemtoseconds(llhd::TimeAttr attr) {
+  auto scale = llvm::StringSwitch<uint64_t>(attr.getTimeUnit())
+                   .Case("fs", 1)
+                   .Case("ps", 1'000ULL)
+                   .Case("ns", 1'000'000ULL)
+                   .Case("us", 1'000'000'000ULL)
+                   .Case("ms", 1'000'000'000'000ULL)
+                   .Case("s", 1'000'000'000'000'000ULL)
+                   .Default(0);
+  if (scale == 0 ||
+      attr.getTime() > std::numeric_limits<uint64_t>::max() / scale)
+    return std::nullopt;
+  return attr.getTime() * scale;
+}
 
 LogicalResult ModuleLowering::run() {
   LLVM_DEBUG(llvm::dbgs() << "Lowering module `" << moduleOp.getModuleName()
@@ -521,6 +545,201 @@ LogicalResult ModuleLowering::lowerPendingSignalUpdates() {
     builder.setInsertionPoint(ifChangedOp.thenYield());
     requestDelta(builder, loc);
   }
+  return success();
+}
+
+/// Get the types of the states that hold a signal's value and shadow storage,
+/// in the order of the fields of `SignalStorage`.
+static SmallVector<Type, 4> getSignalStorageTypes(llhd::RefType type) {
+  auto *context = type.getContext();
+  auto nestedType = type.getNestedType();
+  auto maskWidth = isa<FloatType>(nestedType) ? 1 : hw::getBitWidth(nestedType);
+  return {StateType::get(nestedType), StateType::get(nestedType),
+          StateType::get(IntegerType::get(context, maskWidth)),
+          StateType::get(IntegerType::get(context, 64))};
+}
+
+/// Lower the signal reference arguments of a coroutine. Each `!llhd.ref<T>`
+/// argument is expanded into four arguments holding the states of the signal's
+/// value and shadow storage, and probes and drives of the signal in the body
+/// are lowered to reads and writes of these states.
+///
+/// Since the caller always passes the same signal, uses of the argument refer
+/// to the entry block's argument throughout the body. The coroutine lowering
+/// persists these values across suspension points. The corresponding
+/// arguments of resume blocks are expanded as well, but remain unused.
+LogicalResult
+ModuleLowering::lowerCoroutineSignals(CoroutineDefineOp defineOp) {
+  if (!loweredCoroutines.insert(defineOp).second)
+    return success();
+  auto argTypes = defineOp.getArgumentTypes();
+  if (!llvm::any_of(argTypes,
+                    [](Type type) { return isa<llhd::RefType>(type); }))
+    return success();
+
+  for (auto type : argTypes)
+    if (auto refType = dyn_cast<llhd::RefType>(type))
+      if (!signals::hasBitRepresentation(refType.getNestedType()))
+        return defineOp.emitOpError()
+               << "has signal argument of unsupported type " << refType;
+
+  // Compute the new argument types.
+  SmallVector<Type> newArgTypes;
+  for (auto type : argTypes) {
+    if (auto refType = dyn_cast<llhd::RefType>(type))
+      llvm::append_range(newArgTypes, getSignalStorageTypes(refType));
+    else
+      newArgTypes.push_back(type);
+  }
+
+  // Collect the blocks that receive the coroutine's arguments.
+  auto &body = defineOp.getBody();
+  SetVector<Block *> argBlocks;
+  argBlocks.insert(&body.front());
+  defineOp.walk(
+      [&](CoroutineYieldOp yieldOp) { argBlocks.insert(yieldOp.getDest()); });
+
+  // Expand the signal arguments of these blocks.
+  DenseMap<Value, SignalStorage> expandedArgs;
+  SmallVector<BlockArgument> oldArgs;
+  for (auto *block : argBlocks) {
+    unsigned pos = 0;
+    for (auto type : argTypes) {
+      auto refType = dyn_cast<llhd::RefType>(type);
+      if (!refType) {
+        ++pos;
+        continue;
+      }
+      auto oldArg = block->getArgument(pos);
+      auto loc = oldArg.getLoc();
+      auto types = getSignalStorageTypes(refType);
+      SignalStorage storage;
+      storage.value = block->insertArgument(pos + 1, types[0], loc);
+      storage.next = block->insertArgument(pos + 2, types[1], loc);
+      storage.mask = block->insertArgument(pos + 3, types[2], loc);
+      storage.time = block->insertArgument(pos + 4, types[3], loc);
+      expandedArgs[oldArg] = storage;
+      oldArgs.push_back(oldArg);
+      pos += 5;
+    }
+  }
+
+  // Expand the signal operands of branches to these blocks. Yields do not
+  // forward any operands for the coroutine's arguments.
+  for (auto *block : argBlocks) {
+    for (auto &use : llvm::make_early_inc_range(block->getUses())) {
+      auto branchOp = dyn_cast<BranchOpInterface>(use.getOwner());
+      if (!branchOp || isa<CoroutineYieldOp>(use.getOwner()))
+        continue;
+      auto succOperands = branchOp.getSuccessorOperands(use.getOperandNumber());
+      SmallVector<Value> newOperands;
+      for (auto operand : succOperands.getForwardedOperands()) {
+        newOperands.push_back(operand);
+        if (auto it = expandedArgs.find(operand); it != expandedArgs.end())
+          newOperands.append({it->second.value, it->second.next,
+                              it->second.mask, it->second.time});
+      }
+      succOperands.getMutableForwardedOperands().assign(newOperands);
+    }
+  }
+
+  // Find or create the context of the model executing the coroutine.
+  Value arcContext;
+  for (auto contextOp : body.front().getOps<InferredContextOp>()) {
+    arcContext = contextOp;
+    break;
+  }
+  if (!arcContext) {
+    auto builder = OpBuilder::atBlockBegin(&body.front());
+    arcContext = InferredContextOp::create(builder, defineOp.getLoc());
+  }
+
+  // Lower the probes and drives of the signal arguments.
+  SmallVector<Operation *> accessOps;
+  defineOp.walk([&](Operation *op) {
+    if (isa<llhd::ProbeOp, llhd::AssignOp, llhd::DriveOp>(op))
+      accessOps.push_back(op);
+  });
+  for (auto *op : accessOps) {
+    SmallVector<signals::Projection> projections;
+    auto root = signals::getRootRef(op->getOperand(0), projections);
+    auto it = expandedArgs.find(root);
+    if (it == expandedArgs.end())
+      return op->emitOpError()
+             << "accesses unsupported signal reference in coroutine";
+    auto &storage = it->second;
+    auto loc = op->getLoc();
+    OpBuilder builder(op);
+
+    if (auto probeOp = dyn_cast<llhd::ProbeOp>(op)) {
+      auto value = signals::emitProbe(builder, loc, storage, projections);
+      probeOp.replaceAllUsesWith(value);
+      probeOp.erase();
+      continue;
+    }
+
+    Value value, enable, delay;
+    if (auto assignOp = dyn_cast<llhd::AssignOp>(op)) {
+      value = assignOp.getValue();
+      enable = assignOp.getEnable();
+    } else {
+      auto driveOp = cast<llhd::DriveOp>(op);
+      value = driveOp.getValue();
+      enable = driveOp.getEnable();
+      if (auto constOp =
+              driveOp.getTime().getDefiningOp<llhd::ConstantTimeOp>()) {
+        auto fs = getTimeInFemtoseconds(constOp.getValue());
+        if (!fs)
+          return driveOp.emitOpError() << "has unsupported delay";
+        if (*fs != 0 || constOp.getValue().getDelta() != 0)
+          delay =
+              hw::ConstantOp::create(builder, loc, builder.getI64Type(), *fs);
+      } else {
+        delay = llhd::TimeToIntOp::create(builder, loc, driveOp.getTime());
+      }
+    }
+    if (!signals::hasBitRepresentation(value.getType()))
+      return op->emitOpError()
+             << "drives signal of unsupported type " << value.getType();
+    if (enable) {
+      auto ifOp = scf::IfOp::create(builder, loc, enable, false);
+      builder.setInsertionPoint(ifOp.thenYield());
+    }
+    signals::emitDrive(builder, loc, arcContext, storage, projections, value,
+                       delay);
+    op->erase();
+  }
+
+  // Remove the projections, which should now be unused, and the old arguments.
+  SmallVector<Operation *> projectionOps;
+  defineOp.walk([&](Operation *op) {
+    if (signals::isProjection(op))
+      projectionOps.push_back(op);
+  });
+  for (auto *op : llvm::reverse(projectionOps))
+    if (op->use_empty())
+      op->erase();
+  for (auto arg : llvm::reverse(oldArgs)) {
+    // Remove the old argument from the forwarded operands of branches.
+    auto *block = arg.getOwner();
+    for (auto &use : llvm::make_early_inc_range(block->getUses())) {
+      auto branchOp = dyn_cast<BranchOpInterface>(use.getOwner());
+      if (!branchOp || isa<CoroutineYieldOp>(use.getOwner()))
+        continue;
+      branchOp.getSuccessorOperands(use.getOperandNumber())
+          .erase(arg.getArgNumber());
+    }
+    if (!arg.use_empty()) {
+      auto d = defineOp.emitOpError()
+               << "has unsupported use of signal argument";
+      d.attachNote(arg.getUses().begin()->getOwner()->getLoc()) << "used here";
+      return d;
+    }
+    arg.getOwner()->eraseArgument(arg.getArgNumber());
+  }
+
+  defineOp.setFunctionType(FunctionType::get(defineOp.getContext(), newArgTypes,
+                                             defineOp.getResultTypes()));
   return success();
 }
 
@@ -1013,12 +1232,38 @@ LogicalResult OpLowering::lower(CoroutineInstanceOp op) {
   // A coroutine samples its arguments in the New phase, so that a re-entry sees
   // the up-to-date values produced in the same evaluation and the change
   // detector below compares against fresh values.
+  //
+  // Signal references are passed as the states holding the signal's value and
+  // shadow storage. For the purpose of change detection, the argument's value
+  // is the current value of the signal.
   SmallVector<Value> inputs;
-  for (auto input : op.getArgs())
+  SmallVector<Value> callArgs;
+  bool anyFailed = false;
+  for (auto input : op.getArgs()) {
+    if (isa<llhd::RefType>(input.getType())) {
+      auto sigOp = input.getDefiningOp<llhd::SignalOp>();
+      if (!sigOp) {
+        if (!initial)
+          op.emitOpError() << "has unsupported signal reference argument";
+        anyFailed = true;
+        continue;
+      }
+      if (initial)
+        continue;
+      module.allocateSignalShadow(sigOp);
+      auto &storage = module.getSignalStorage(sigOp);
+      inputs.push_back(
+          StateReadOp::create(module.builder, op.getLoc(), storage.value));
+      callArgs.append(
+          {storage.value, storage.next, storage.mask, storage.time});
+      continue;
+    }
     inputs.push_back(lowerValue(input, Phase::New));
+    callArgs.push_back(inputs.back());
+  }
   if (initial)
     return success();
-  if (llvm::is_contained(inputs, Value{}))
+  if (anyFailed || llvm::is_contained(inputs, Value{}))
     return failure();
 
   // Resolve the callee to obtain its state, program counter, and result types.
@@ -1028,6 +1273,8 @@ LogicalResult OpLowering::lower(CoroutineInstanceOp op) {
   auto defineOp =
       module.symbolTable.lookup<CoroutineDefineOp>(callee.getAttr());
   assert(defineOp && "verified by CoroutineInstanceOp::verifySymbolUses");
+  if (failed(module.lowerCoroutineSignals(defineOp)))
+    return failure();
   auto loc = op.getLoc();
   auto *context = op.getContext();
   auto stateType = CoroutineStateType::get(context, callee);
@@ -1076,8 +1323,15 @@ LogicalResult OpLowering::lower(CoroutineInstanceOp op) {
                                            module.storageArg);
       auto prev = StateReadOp::create(module.builder, loc, prevSlot);
       StateWriteOp::create(module.builder, loc, prevSlot, input);
-      auto changed = comb::ICmpOp::create(module.builder, loc,
-                                          comb::ICmpPredicate::ne, input, prev);
+      Value changed;
+      if (signals::hasBitRepresentation(input.getType()))
+        changed =
+            comb::ICmpOp::create(module.builder, loc, comb::ICmpPredicate::ne,
+                                 signals::toBits(module.builder, loc, input),
+                                 signals::toBits(module.builder, loc, prev));
+      else
+        return op.emitOpError() << "cannot detect changes of argument of type "
+                                << input.getType();
       auto maskBit =
           comb::ExtractOp::create(module.builder, loc, mask,
                                   static_cast<unsigned>(index), /*bitWidth=*/1);
@@ -1109,7 +1363,7 @@ LogicalResult OpLowering::lower(CoroutineInstanceOp op) {
     callResultTypes.push_back(pcType);
     llvm::append_range(callResultTypes, defineOp.getResultTypes());
     auto call = CoroutineCallOp::create(module.builder, loc, callResultTypes,
-                                        callee, oldState, oldPc, inputs);
+                                        callee, oldState, oldPc, callArgs);
     auto newState = call.getResult(0);
     auto newPc = call.getResult(1);
     auto wakeupNew = call.getResults().back();
@@ -1418,24 +1672,6 @@ LogicalResult OpLowering::lower(sim::ClockedTerminateOp op) {
                            op.getSuccessAttr());
 
   return success();
-}
-
-/// Convert a constant time to an integer number of femtoseconds. Returns
-/// `std::nullopt` if the unit is unsupported or the time does not fit into 64
-/// bits. The delta and epsilon components are ignored.
-static std::optional<uint64_t> getTimeInFemtoseconds(llhd::TimeAttr attr) {
-  auto scale = llvm::StringSwitch<uint64_t>(attr.getTimeUnit())
-                   .Case("fs", 1)
-                   .Case("ps", 1'000ULL)
-                   .Case("ns", 1'000'000ULL)
-                   .Case("us", 1'000'000'000ULL)
-                   .Case("ms", 1'000'000'000'000ULL)
-                   .Case("s", 1'000'000'000'000'000ULL)
-                   .Default(0);
-  if (scale == 0 ||
-      attr.getTime() > std::numeric_limits<uint64_t>::max() / scale)
-    return std::nullopt;
-  return attr.getTime() * scale;
 }
 
 /// Lower an LLHD signal to an allocated state, and store its initial value
@@ -1847,8 +2083,9 @@ struct LowerStatePass : public arc::impl::LowerStatePassBase<LowerStatePass> {
 void LowerStatePass::runOnOperation() {
   auto op = getOperation();
   auto &symbolTable = getAnalysis<SymbolTable>();
+  DenseSet<Operation *> loweredCoroutines;
   for (auto moduleOp : llvm::make_early_inc_range(op.getOps<HWModuleOp>())) {
-    if (failed(ModuleLowering(moduleOp, symbolTable).run()))
+    if (failed(ModuleLowering(moduleOp, symbolTable, loweredCoroutines).run()))
       return signalPassFailure();
     moduleOp.erase();
   }

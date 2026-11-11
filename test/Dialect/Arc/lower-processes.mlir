@@ -655,3 +655,48 @@ hw.module @SimControl(in %a: i1, out x: i32) {
   }
   hw.output %0 : i32
 }
+
+//===----------------------------------------------------------------------===//
+// Signals referenced inside the process are captured as coroutine arguments.
+// Projections into signals defined outside the process are cloned right before
+// their uses, such that their dynamic indices use the argument values of the
+// current entry. Uses of the signal itself refer to the entry block argument
+// on every entry. Observing a probed signal sets the signal argument's bit in
+// the observe bitmask.
+
+// CHECK-LABEL: arc.coroutine.define @SignalCaptures.llhd.process
+// CHECK-SAME: ([[S:%.+]]: !llhd.ref<!hw.array<2xi8>>, [[IDX:%.+]]: i1) -> (i2, i64)
+// CHECK:   cf.br ^[[BB1:.+]]([[IDX]] : i1)
+// CHECK: ^[[BB1]]([[IDX1:%.+]]: i1):
+// CHECK:   [[E1:%.+]] = llhd.sig.array_get [[S]][[[IDX1]]]
+// CHECK:   [[P:%.+]] = llhd.prb [[E1]]
+// CHECK:   [[MASK:%.+]] = hw.constant 1 : i2
+// CHECK:   arc.coroutine.yield ([[MASK]], {{%.+}} : i2, i64), ^[[BB2:.+]]
+// CHECK: ^[[BB2]]({{%.+}}: !llhd.ref<!hw.array<2xi8>>, [[IDX2:%.+]]: i1):
+// CHECK:   [[N:%.+]] = comb.add [[P]]
+// CHECK:   [[E2:%.+]] = llhd.sig.array_get [[S]][[[IDX2]]]
+// CHECK:   llhd.drv [[E2]], [[N]] after
+// CHECK:   cf.br ^[[BB1]]([[IDX2]] : i1)
+
+// CHECK-LABEL: hw.module @SignalCaptures
+// CHECK: [[SIG:%.+]] = llhd.sig
+// CHECK: arc.coroutine.instance @SignalCaptures.llhd.process([[SIG]], %idx) sensitive [true, false]
+hw.module @SignalCaptures(in %idx: i1) {
+  %c0_i16 = hw.constant 0 : i16
+  %init = hw.bitcast %c0_i16 : (i16) -> !hw.array<2xi8>
+  %s = llhd.sig %init : <!hw.array<2xi8>>
+  %e = llhd.sig.array_get %s[%idx] : <!hw.array<2xi8>>
+  %delta = llhd.constant_time <0ns, 1d>
+  llhd.process {
+    cf.br ^bb1
+  ^bb1:
+    %p = llhd.prb %e : i8
+    llhd.wait (%p : i8), ^bb2
+  ^bb2:
+    %c1_i8 = hw.constant 1 : i8
+    %n = comb.add %p, %c1_i8 : i8
+    llhd.drv %e, %n after %delta : i8
+    cf.br ^bb1
+  }
+  hw.output
+}

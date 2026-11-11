@@ -45,6 +45,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "SignalUtils.h"
 #include "circt/Dialect/Arc/ArcOps.h"
 #include "circt/Dialect/Arc/ArcPasses.h"
 #include "circt/Dialect/Comb/CombOps.h"
@@ -171,34 +172,49 @@ void ProcessLowering::replaceUnreachables() {
 
 void ProcessLowering::collectCaptures() {
   auto &body = processOp.getBody();
-  auto builder = OpBuilder::atBlockBegin(&body.front());
+  auto entryBuilder = OpBuilder::atBlockBegin(&body.front());
   SmallDenseSet<Value> captureSet;
   DenseMap<Operation *, Operation *> clonedConstants;
-  body.walk([&](Operation *op) {
-    for (auto &operand : op->getOpOperands()) {
-      auto value = operand.get();
 
-      // Skip values defined inside the body.
-      if (body.isAncestor(value.getParentRegion()))
-        continue;
-
-      // Remap references to outside-defined constants to clones of the
-      // constants in the entry block.
-      auto result = dyn_cast<OpResult>(value);
-      if (result && result.getOwner()->hasTrait<OpTrait::ConstantLike>()) {
-        auto *&cloned = clonedConstants[result.getOwner()];
-        if (!cloned)
-          cloned = builder.clone(*result.getOwner());
-        operand.set(cloned->getResult(result.getResultNumber()));
-        continue;
-      }
-
-      // Otherwise this is an outside-defined SSA value we need to capture as an
-      // argument of the coroutine.
-      if (captureSet.insert(value).second)
-        captures.push_back(value);
+  // Map an outside-defined value to a value usable inside the body by the
+  // given user. Constants are cloned into the entry block. Projections into
+  // signals are cloned right before the user, such that their dynamic indices
+  // are re-evaluated with the coroutine argument values on every entry. Only
+  // the projected signal itself and dynamic indices have to be captured.
+  std::function<Value(Value, Operation *)> capture =
+      [&](Value value, Operation *user) -> Value {
+    auto result = dyn_cast<OpResult>(value);
+    if (result && result.getOwner()->hasTrait<OpTrait::ConstantLike>()) {
+      auto *&cloned = clonedConstants[result.getOwner()];
+      if (!cloned)
+        cloned = entryBuilder.clone(*result.getOwner());
+      return cloned->getResult(result.getResultNumber());
     }
-  });
+    if (result && signals::isProjection(result.getOwner())) {
+      auto *cloned = result.getOwner()->clone();
+      OpBuilder(user).insert(cloned);
+      for (auto &operand : cloned->getOpOperands())
+        operand.set(capture(operand.get(), cloned));
+      return cloned->getResult(result.getResultNumber());
+    }
+
+    // Otherwise this is an outside-defined SSA value we need to capture as an
+    // argument of the coroutine.
+    if (captureSet.insert(value).second)
+      captures.push_back(value);
+    return value;
+  };
+
+  SmallVector<Operation *> ops;
+  body.walk([&](Operation *op) { ops.push_back(op); });
+  for (auto *op : ops) {
+    for (auto &operand : op->getOpOperands()) {
+      // Skip values defined inside the body.
+      if (body.isAncestor(operand.get().getParentRegion()))
+        continue;
+      operand.set(capture(operand.get(), op));
+    }
+  }
 }
 
 void ProcessLowering::createCoroutine() {
@@ -369,11 +385,18 @@ LogicalResult ProcessLowering::rewriteTerminators() {
       // that map to a coroutine argument set a bit; internally-defined values
       // (which can never change) and forwarded block arguments contribute none.
       APInt maskBits(maskWidth, 0);
-      for (auto observed : wait.getObserved())
+      for (auto observed : wait.getObserved()) {
+        // Observing the probed value of a signal argument observes the
+        // signal itself.
+        if (auto probeOp = observed.getDefiningOp<llhd::ProbeOp>()) {
+          SmallVector<signals::Projection> projections;
+          observed = signals::getRootRef(probeOp.getSignal(), projections);
+        }
         if (auto it = argIndices.find(observed); it != argIndices.end()) {
           maskBits.setBit(it->second);
           staticSensitivityMask[it->second] = true;
         }
+      }
       auto mask = hw::ConstantOp::create(builder, loc, maskBits);
 
       // A wait without a delay never resumes on time; use the sentinel `-1` as
@@ -548,8 +571,15 @@ LogicalResult ProcessLowering::run() {
     Liveness liveness(coroOp);
     DominanceInfo dominance(coroOp);
     for (unsigned argIdx = 0, argNum = entryArgs.size(); argIdx != argNum;
-         ++argIdx)
+         ++argIdx) {
+      // References to signals passed into the coroutine always refer to the
+      // same signal on every entry. Uses can keep referring to the entry
+      // block's argument, which is persisted across suspensions like any other
+      // value.
+      if (isa<llhd::RefType>(entryArgs[argIdx].getType()))
+        continue;
       renameCoroutineArgument(argIdx, liveness, dominance);
+    }
   }
 
   buildInstance();

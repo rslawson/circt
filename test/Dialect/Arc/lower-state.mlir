@@ -1009,3 +1009,56 @@ hw.module @AggregateSignals(in %idx: i1, in %v: i8, out o: i8) {
   llhd.assign %e, %v : i8
   hw.output %p : i8
 }
+
+// Signal references passed to coroutines are expanded into the states holding
+// the signal's value and shadow storage. Probes and drives of the signal in the
+// coroutine body are lowered to accesses of these states. Changes of the
+// signal's value are detected through its value state.
+// CHECK-LABEL: arc.coroutine.define @SignalCoroutine
+// CHECK-SAME: ([[V:%.+]]: !arc.state<i8>, [[NEXT:%.+]]: !arc.state<i8>, [[MASK:%.+]]: !arc.state<i8>, [[TIME:%.+]]: !arc.state<i64>, [[EN:%.+]]: i1) -> (i2, i64)
+// CHECK:   [[CTX:%.+]] = arc.inferred_context
+// CHECK:   [[P:%.+]] = arc.state_read [[V]] : <i8>
+// CHECK:   arc.coroutine.yield ({{%.+}}, {{%.+}} : i2, i64), ^[[BB1:.+]]
+// CHECK: ^[[BB1]]({{%.+}}: !arc.state<i8>, {{%.+}}: !arc.state<i8>, {{%.+}}: !arc.state<i8>, {{%.+}}: !arc.state<i64>, {{%.+}}: i1):
+// CHECK:   arc.state_write [[V]]
+// CHECK:   scf.if
+// CHECK:     arc.current_time [[CTX]]
+// CHECK:     arc.set_next_wakeup [[CTX]]
+// CHECK:   arc.state_write [[NEXT]]
+// CHECK:   arc.state_write [[MASK]]
+// CHECK:   arc.state_write [[TIME]]
+// CHECK:   arc.coroutine.halt
+arc.coroutine.define @SignalCoroutine(%s: !llhd.ref<i8>, %en: i1) -> (i2, i64) {
+  %ctx = arc.inferred_context
+  %p = llhd.prb %s : i8
+  %mask = hw.constant 1 : i2
+  %never = hw.constant -1 : i64
+  arc.coroutine.yield (%mask, %never : i2, i64), ^bb1
+^bb1(%s1: !llhd.ref<i8>, %en1: i1):
+  %c1_i8 = hw.constant 1 : i8
+  %n = comb.add %p, %c1_i8 : i8
+  llhd.assign %s, %n : i8
+  %delta = llhd.constant_time <0ns, 1d>
+  llhd.drv %s, %p after %delta if %en1 : i8
+  %nomask = hw.constant 0 : i2
+  arc.coroutine.halt %nomask, %never : i2, i64
+}
+
+// CHECK-LABEL: arc.model @SignalCoroutineInstance
+hw.module @SignalCoroutineInstance(in %en: i1) {
+  // CHECK-DAG: [[V:%.+]] = arc.alloc_state %arg0 {name = "s"} : (!arc.storage) -> !arc.state<i8>
+  // CHECK-DAG: [[NEXT:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i8>
+  // CHECK-DAG: [[MASK:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i8>
+  // CHECK-DAG: [[TIME:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i64>
+  // CHECK-DAG: [[PREV:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i8>
+  // CHECK: [[CUR:%.+]] = arc.state_read [[V]] : <i8>
+  // CHECK: [[EN:%.+]] = arc.state_read %in_en
+  // CHECK: [[OLD:%.+]] = arc.state_read [[PREV]] : <i8>
+  // CHECK: arc.state_write [[PREV]] = [[CUR]] : <i8>
+  // CHECK: comb.icmp ne [[CUR]], [[OLD]] : i8
+  // CHECK: arc.coroutine.call @SignalCoroutine({{%.+}}, {{%.+}}, [[V]], [[NEXT]], [[MASK]], [[TIME]], [[EN]])
+  %c0_i8 = hw.constant 0 : i8
+  %s = llhd.sig %c0_i8 : <i8>
+  arc.coroutine.instance @SignalCoroutine(%s, %en) sensitive [true, false] : (!llhd.ref<i8>, i1) -> ()
+  hw.output
+}
