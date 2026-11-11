@@ -57,7 +57,7 @@ endmodule
 module Foo;
   int a;
   // expected-error @below {{unsupported statement}}
-  initial release a;
+  initial randcase 1: a = 1; endcase
 endmodule
 
 // -----
@@ -595,4 +595,12 @@ endprimitive
 
 module TestNoActiveTransitions(input logic d, output logic q);
   udp_no_active_transitions u_nat (q, d);
+endmodule
+
+// -----
+
+module Foo;
+  wire a;
+  // expected-error @below {{unsupported: forcing nets}}
+  initial force a = 1;
 endmodule
