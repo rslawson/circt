@@ -6,6 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "SignalUtils.h"
 #include "circt/Dialect/Arc/ArcOps.h"
 #include "circt/Dialect/Arc/ArcPasses.h"
 #include "circt/Dialect/Comb/CombDialect.h"
@@ -26,6 +27,8 @@
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/Pass.h"
+#include "llvm/ADT/MapVector.h"
+#include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Debug.h"
 
@@ -43,6 +46,7 @@ using namespace arc;
 using namespace hw;
 using namespace mlir;
 using llvm::SmallDenseSet;
+using signals::SignalStorage;
 
 namespace {
 enum class Phase { Initial, Old, New, Final };
@@ -107,6 +111,14 @@ struct OpLowering {
   LogicalResult lower(llhd::FinalOp op);
   LogicalResult lower(llhd::CurrentTimeOp op);
   LogicalResult lower(sim::ClockedTerminateOp op);
+  LogicalResult lower(llhd::SignalOp op);
+  LogicalResult lower(llhd::ProbeOp op);
+  LogicalResult lower(llhd::AssignOp op);
+  LogicalResult lower(llhd::DriveOp op);
+  LogicalResult lowerDrive(Operation *op, Value signal, Value value,
+                           Value enable, Value delay);
+  LogicalResult lowerRef(Value ref, Phase phase, llhd::SignalOp &rootOp,
+                         SmallVectorImpl<signals::Projection> &projections);
 
   scf::IfOp createIfClockOp(Value clock);
 
@@ -168,6 +180,8 @@ struct ModuleLowering {
   DenseMap<Value, Value> allocatedInitials;
   /// The allocated storage for taps.
   DenseMap<Operation *, Value> allocatedTaps;
+  /// The allocated storage for LLHD signals.
+  MapVector<Operation *, SignalStorage> allocatedSignals;
 
   /// A mapping from unlowered clocks to a value indicating a posedge. This is
   /// used to not create an excessive number of posedge detectors.
@@ -189,6 +203,10 @@ struct ModuleLowering {
   Value detectPosedge(Value clock);
   OpBuilder &getBuilder(Phase phase);
   Value requireLoweredValue(Value value, Phase phase, Location useLoc);
+  SignalStorage &getSignalStorage(llhd::SignalOp op);
+  void allocateSignalShadow(llhd::SignalOp op);
+  void requestDelta(OpBuilder &builder, Location loc);
+  LogicalResult lowerPendingSignalUpdates();
 };
 } // namespace
 
@@ -240,16 +258,32 @@ LogicalResult ModuleLowering::run() {
     allocatedInputs.push_back(state);
   }
 
-  // Lower the ops.
+  // Lower the ops. Drives of LLHD signals are deferred until the end of the
+  // evaluation, such that all other ops observe the signal values of the
+  // previous evaluation. A changing signal triggers a re-evaluation of the
+  // model in the same time step (a delta cycle), which propagates the new
+  // value to its readers.
+  SmallVector<Operation *> signalDrives;
   for (auto &op : moduleOp.getOps()) {
     if (mlir::isMemoryEffectFree(&op) &&
         !isa<hw::OutputOp, sim::ClockedTerminateOp>(op))
       continue;
     if (isa<MemoryReadPortOp, MemoryWritePortOp>(op))
       continue; // handled as part of `MemoryOp`
+    if (isa<llhd::AssignOp, llhd::DriveOp>(op)) {
+      signalDrives.push_back(&op);
+      continue;
+    }
     if (failed(lowerOp(&op)))
       return failure();
   }
+  for (auto *op : signalDrives)
+    if (failed(lowerOp(op)))
+      return failure();
+
+  // Apply pending signal updates scheduled by delayed drives.
+  if (failed(lowerPendingSignalUpdates()))
+    return failure();
 
   // Clean up any dead ops. The lowering inserts a few defensive
   // `arc.state_read` ops that may remain unused. This cleans them up.
@@ -270,6 +304,8 @@ LogicalResult ModuleLowering::lowerOp(Operation *op) {
     phases = {Phase::Initial};
   if (isa<llhd::FinalOp>(op))
     phases = {Phase::Final};
+  if (isa<llhd::SignalOp>(op))
+    phases = {Phase::Initial};
   if (isa<StateOp>(op))
     phases = {Phase::Initial, Phase::New};
 
@@ -391,6 +427,103 @@ Value ModuleLowering::detectPosedge(Value clock) {
   return comb::AndOp::create(builder, loc, edge, clock);
 }
 
+/// Get the storage allocated for an LLHD signal. Allocates the storage if it
+/// does not yet exist.
+SignalStorage &ModuleLowering::getSignalStorage(llhd::SignalOp op) {
+  auto &storage = allocatedSignals[op];
+  if (!storage.value) {
+    auto type = op.getType().getNestedType();
+    auto alloc = AllocStateOp::create(allocBuilder, op.getLoc(),
+                                      StateType::get(type), storageArg);
+    if (auto name = op.getNameAttr())
+      alloc->setAttr("name", name);
+    storage.value = alloc;
+  }
+  return storage;
+}
+
+/// Allocate the shadow storage for an LLHD signal that is driven with a delay.
+void ModuleLowering::allocateSignalShadow(llhd::SignalOp op) {
+  auto &storage = getSignalStorage(op);
+  if (storage.next)
+    return;
+  auto loc = op.getLoc();
+  auto type = op.getType().getNestedType();
+  auto maskWidth = isa<FloatType>(type) ? 1 : hw::getBitWidth(type);
+  storage.next =
+      AllocStateOp::create(allocBuilder, loc, StateType::get(type), storageArg);
+  storage.mask = AllocStateOp::create(
+      allocBuilder, loc, StateType::get(allocBuilder.getIntegerType(maskWidth)),
+      storageArg);
+  storage.time = AllocStateOp::create(
+      allocBuilder, loc, StateType::get(allocBuilder.getI64Type()), storageArg);
+}
+
+/// Request a re-evaluation of the model in the current time step.
+void ModuleLowering::requestDelta(OpBuilder &builder, Location loc) {
+  auto now = CurrentTimeOp::create(builder, loc, arcContext);
+  signals::emitScheduleWakeup(builder, loc, arcContext, now);
+}
+
+/// Apply the pending values of signals driven with a delay once their
+/// scheduled time has been reached. If the time has not been reached yet,
+/// schedule a wakeup of the model at that time.
+LogicalResult ModuleLowering::lowerPendingSignalUpdates() {
+  for (auto &[op, storage] : allocatedSignals) {
+    if (!storage.next)
+      continue;
+    auto loc = op->getLoc();
+    auto type = cast<StateType>(storage.value.getType()).getType();
+
+    // Check if an update is pending.
+    auto mask = StateReadOp::create(builder, loc, storage.mask);
+    auto zeroMask = hw::ConstantOp::create(builder, loc, mask.getType(), 0);
+    auto pending = comb::ICmpOp::create(builder, loc, comb::ICmpPredicate::ne,
+                                        mask, zeroMask);
+    auto ifPendingOp = scf::IfOp::create(builder, loc, pending, false);
+    OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPoint(ifPendingOp.thenYield());
+
+    // Check if the update is due.
+    auto now = CurrentTimeOp::create(builder, loc, arcContext);
+    auto time = StateReadOp::create(builder, loc, storage.time);
+    auto due =
+        comb::ICmpOp::create(builder, loc, comb::ICmpPredicate::uge, now, time);
+    auto ifDueOp = scf::IfOp::create(builder, loc, due, true);
+
+    // If the update is not due yet, schedule a wakeup.
+    builder.setInsertionPoint(ifDueOp.elseYield());
+    signals::emitScheduleWakeup(builder, loc, arcContext, time);
+
+    // Otherwise apply the pending bits and clear the mask.
+    builder.setInsertionPoint(ifDueOp.thenYield());
+    auto oldValue = StateReadOp::create(builder, loc, storage.value);
+    auto nextValue = StateReadOp::create(builder, loc, storage.next);
+    Value newValue = nextValue;
+    if (!isa<FloatType>(type)) {
+      auto oldBits = signals::toBits(builder, loc, oldValue);
+      auto nextBits = signals::toBits(builder, loc, nextValue);
+      auto allOnes = hw::ConstantOp::create(
+          builder, loc, APInt::getAllOnes(hw::getBitWidth(type)));
+      auto invMask = comb::XorOp::create(builder, loc, mask, allOnes);
+      auto keptBits = comb::AndOp::create(builder, loc, oldBits, invMask);
+      auto newBits = comb::AndOp::create(builder, loc, nextBits, mask);
+      auto bits = comb::OrOp::create(builder, loc, keptBits, newBits);
+      newValue = signals::fromBits(builder, loc, bits, type);
+    }
+    StateWriteOp::create(builder, loc, storage.value, newValue);
+    StateWriteOp::create(builder, loc, storage.mask, zeroMask);
+    auto oldBits = signals::toBits(builder, loc, oldValue);
+    auto newBits = signals::toBits(builder, loc, newValue);
+    auto changed = comb::ICmpOp::create(builder, loc, comb::ICmpPredicate::ne,
+                                        oldBits, newBits);
+    auto ifChangedOp = scf::IfOp::create(builder, loc, changed, false);
+    builder.setInsertionPoint(ifChangedOp.thenYield());
+    requestDelta(builder, loc);
+  }
+  return success();
+}
+
 /// Get the builder appropriate for the given phase.
 OpBuilder &ModuleLowering::getBuilder(Phase phase) {
   switch (phase) {
@@ -438,7 +571,8 @@ LogicalResult OpLowering::lower() {
       // Operations with special lowering.
       .Case<StateOp, sim::DPICallOp, MemoryOp, TapOp, InstanceOp,
             CoroutineInstanceOp, hw::TriggeredOp, hw::OutputOp, seq::InitialOp,
-            llhd::FinalOp, llhd::CurrentTimeOp, sim::ClockedTerminateOp>(
+            llhd::FinalOp, llhd::CurrentTimeOp, sim::ClockedTerminateOp,
+            llhd::SignalOp, llhd::ProbeOp, llhd::AssignOp, llhd::DriveOp>(
           [&](auto op) { return lower(op); })
 
       // Operations that should be skipped entirely and never land on the
@@ -1286,6 +1420,170 @@ LogicalResult OpLowering::lower(sim::ClockedTerminateOp op) {
   return success();
 }
 
+/// Convert a constant time to an integer number of femtoseconds. Returns
+/// `std::nullopt` if the unit is unsupported or the time does not fit into 64
+/// bits. The delta and epsilon components are ignored.
+static std::optional<uint64_t> getTimeInFemtoseconds(llhd::TimeAttr attr) {
+  auto scale = llvm::StringSwitch<uint64_t>(attr.getTimeUnit())
+                   .Case("fs", 1)
+                   .Case("ps", 1'000ULL)
+                   .Case("ns", 1'000'000ULL)
+                   .Case("us", 1'000'000'000ULL)
+                   .Case("ms", 1'000'000'000'000ULL)
+                   .Case("s", 1'000'000'000'000'000ULL)
+                   .Default(0);
+  if (scale == 0 ||
+      attr.getTime() > std::numeric_limits<uint64_t>::max() / scale)
+    return std::nullopt;
+  return attr.getTime() * scale;
+}
+
+/// Lower an LLHD signal to an allocated state, and store its initial value
+/// into the state in the initial phase.
+LogicalResult OpLowering::lower(llhd::SignalOp op) {
+  assert(phase == Phase::Initial);
+  Value init;
+  if (op.getInit())
+    init = lowerValue(op.getInit(), Phase::Initial);
+  if (initial)
+    return success();
+  if (op.getInit() && !init)
+    return failure();
+
+  auto &storage = module.getSignalStorage(op);
+  if (init)
+    StateWriteOp::create(module.initialBuilder, op.getLoc(), storage.value,
+                         init);
+  return success();
+}
+
+/// Resolve a reference to the LLHD signal it is derived from, and the chain of
+/// projections that select a part of that signal. The dynamic indices of the
+/// projections are lowered in the given phase.
+LogicalResult
+OpLowering::lowerRef(Value ref, Phase phase, llhd::SignalOp &rootOp,
+                     SmallVectorImpl<signals::Projection> &projections) {
+  auto root = signals::getRootRef(ref, projections);
+  rootOp = root.getDefiningOp<llhd::SignalOp>();
+  bool anyFailed = false;
+  for (auto &proj : projections) {
+    if (!proj.index)
+      continue;
+    proj.index = lowerValue(proj.index, phase);
+    if (!proj.index)
+      anyFailed = true;
+  }
+  if (initial)
+    return success();
+  if (!rootOp)
+    return emitError(ref.getLoc())
+           << "unsupported reference; must be derived from an `llhd.sig`";
+  return failure(anyFailed);
+}
+
+/// Lower an LLHD signal probe to a read of the signal's storage.
+LogicalResult OpLowering::lower(llhd::ProbeOp op) {
+  llhd::SignalOp rootOp;
+  SmallVector<signals::Projection> projections;
+  if (failed(lowerRef(op.getSignal(), phase, rootOp, projections)))
+    return failure();
+  if (initial) {
+    // Reading a signal during the initial phase requires its initial value to
+    // have been stored first.
+    if (phase == Phase::Initial && rootOp)
+      addPending(rootOp.getOperation(), Phase::Initial);
+    return success();
+  }
+
+  auto value = signals::emitProbe(module.getBuilder(phase), op.getLoc(),
+                                  module.getSignalStorage(rootOp), projections);
+  module.loweredValues[{op.getResult(), phase}] = value;
+  return success();
+}
+
+LogicalResult OpLowering::lower(llhd::AssignOp op) {
+  return lowerDrive(op, op.getSignal(), op.getValue(), op.getEnable(), {});
+}
+
+LogicalResult OpLowering::lower(llhd::DriveOp op) {
+  return lowerDrive(op, op.getSignal(), op.getValue(), op.getEnable(),
+                    op.getTime());
+}
+
+/// Lower an LLHD signal drive. Drives without a delay immediately update the
+/// signal's storage. Drives with a delay update the signal's shadow storage,
+/// which is applied to the signal once the scheduled time is reached. In both
+/// cases, a change of the signal's value requests a re-evaluation of the model
+/// in the current time step.
+LogicalResult OpLowering::lowerDrive(Operation *op, Value signal, Value value,
+                                     Value enable, Value delay) {
+  assert(phase == Phase::New);
+  auto loc = op->getLoc();
+
+  // Determine the delay of the drive. Constant delays are evaluated directly,
+  // since the delta component of the time cannot be represented at runtime.
+  // A drive is immediate if it has no delay or a zero delay without a delta
+  // component.
+  std::optional<uint64_t> constDelay;
+  bool immediate = false;
+  if (!delay) {
+    constDelay = 0;
+    immediate = true;
+  } else if (auto constOp = delay.getDefiningOp<llhd::ConstantTimeOp>()) {
+    constDelay = getTimeInFemtoseconds(constOp.getValue());
+    if (!constDelay) {
+      if (!initial)
+        return op->emitOpError() << "has unsupported delay";
+      return success();
+    }
+    immediate = *constDelay == 0 && constOp.getValue().getDelta() == 0;
+  }
+
+  // Make sure all operands are lowered.
+  llhd::SignalOp rootOp;
+  SmallVector<signals::Projection> projections;
+  auto refResult = lowerRef(signal, phase, rootOp, projections);
+  auto loweredValue = lowerValue(value, phase);
+  Value loweredEnable, loweredDelay;
+  if (enable)
+    loweredEnable = lowerValue(enable, phase);
+  if (!constDelay)
+    loweredDelay = lowerValue(delay, phase);
+  if (initial)
+    return success();
+  if (failed(refResult) || !loweredValue || (enable && !loweredEnable) ||
+      (!constDelay && !loweredDelay))
+    return failure();
+
+  auto type = rootOp.getType().getNestedType();
+  if (!signals::hasBitRepresentation(type) ||
+      !signals::hasBitRepresentation(loweredValue.getType()))
+    return op->emitOpError() << "drives signal of unsupported type " << type;
+
+  // Only perform the drive if it is enabled.
+  auto &builder = module.builder;
+  OpBuilder::InsertionGuard guard(builder);
+  if (loweredEnable) {
+    auto ifOp = scf::IfOp::create(builder, loc, loweredEnable, false);
+    builder.setInsertionPoint(ifOp.thenYield());
+  }
+
+  // Delayed drives require shadow storage for the signal.
+  Value delayInt;
+  if (!immediate) {
+    module.allocateSignalShadow(rootOp);
+    if (constDelay)
+      delayInt = hw::ConstantOp::create(builder, loc, builder.getI64Type(),
+                                        *constDelay);
+    else
+      delayInt = llhd::TimeToIntOp::create(builder, loc, loweredDelay);
+  }
+  signals::emitDrive(builder, loc, module.arcContext,
+                     module.getSignalStorage(rootOp), projections, loweredValue,
+                     delayInt);
+  return success();
+}
+
 /// Create the operations necessary to detect a posedge on the given clock,
 /// potentially reusing a previous posedge detection, and create an `scf.if`
 /// operation for that posedge. This also tries to reuse an `scf.if` operation
@@ -1331,6 +1629,13 @@ Value OpLowering::lowerValue(Value value, Phase phase) {
   // handled above.)
   auto result = cast<OpResult>(value);
   auto *op = result.getOwner();
+
+  // References to LLHD signals are resolved by the ops using them.
+  if (isa<llhd::RefType>(value.getType())) {
+    if (!initial)
+      emitError(result.getLoc()) << "unsupported use of signal reference";
+    return {};
+  }
 
   // Special handling for some ops.
   if (auto instOp = dyn_cast<InstanceOp>(op))
