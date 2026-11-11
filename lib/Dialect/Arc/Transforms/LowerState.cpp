@@ -196,12 +196,26 @@ struct ModuleLowering {
   /// The coroutines whose signal reference arguments have already been
   /// lowered. Shared across all modules.
   DenseSet<Operation *> &loweredCoroutines;
+  /// Whether the module contains any coroutine instances.
+  bool hasCoroutines = false;
+  /// A builder that inserts ops at the beginning of the model's evaluation.
+  /// Used to snapshot the values of signals and coroutine results.
+  OpBuilder snapshotBuilder;
+  /// The snapshots of the values of signals and coroutine results.
+  DenseMap<Value, Value> snapshots;
+  /// A state indicating whether a signal or coroutine result has changed in
+  /// the current evaluation, which corresponds to the active region of the
+  /// SystemVerilog scheduling semantics. Pending updates of signals, such as
+  /// nonblocking assignments, are only applied once there are no further
+  /// active changes. Null if the module has neither signals nor coroutines.
+  Value activeChangeFlag;
 
   ModuleLowering(HWModuleOp moduleOp, SymbolTable &symbolTable,
                  DenseSet<Operation *> &loweredCoroutines)
       : moduleOp(moduleOp), builder(moduleOp), allocBuilder(moduleOp),
         initialBuilder(moduleOp), finalBuilder(moduleOp),
-        symbolTable(symbolTable), loweredCoroutines(loweredCoroutines) {}
+        symbolTable(symbolTable), loweredCoroutines(loweredCoroutines),
+        snapshotBuilder(moduleOp) {}
   LogicalResult run();
   LogicalResult lowerOp(Operation *op);
   Value getAllocatedState(OpResult result);
@@ -209,6 +223,8 @@ struct ModuleLowering {
   OpBuilder &getBuilder(Phase phase);
   Value requireLoweredValue(Value value, Phase phase, Location useLoc);
   SignalStorage &getSignalStorage(llhd::SignalOp op);
+  Value getSnapshot(Value state);
+  void markActiveChange(OpBuilder &builder, Location loc);
   void allocateSignalShadow(llhd::SignalOp op);
   void requestDelta(OpBuilder &builder, Location loc);
   LogicalResult lowerPendingSignalUpdates();
@@ -273,6 +289,27 @@ LogicalResult ModuleLowering::run() {
   // initial op.
   allocBuilder.setInsertionPoint(initialOp);
 
+  hasCoroutines = !moduleOp.getOps<CoroutineInstanceOp>().empty();
+
+  // Position the snapshot builder at the beginning of the evaluation, after the
+  // initial and final ops. Use a placeholder op as an anchor, which is removed
+  // once the module has been lowered.
+  auto snapshotAnchor = hw::ConstantOp::create(builder, moduleOp.getLoc(),
+                                               builder.getI1Type(), 0);
+  snapshotBuilder.setInsertionPoint(snapshotAnchor);
+
+  // Allocate the flag that tracks active changes in an evaluation, and clear
+  // it at the beginning of every evaluation.
+  if (hasCoroutines || !moduleOp.getOps<llhd::SignalOp>().empty()) {
+    activeChangeFlag =
+        AllocStateOp::create(allocBuilder, moduleOp.getLoc(),
+                             StateType::get(builder.getI1Type()), storageArg);
+    auto falseValue = hw::ConstantOp::create(snapshotBuilder, moduleOp.getLoc(),
+                                             builder.getI1Type(), 0);
+    StateWriteOp::create(snapshotBuilder, moduleOp.getLoc(), activeChangeFlag,
+                         falseValue);
+  }
+
   // Allocate storage for the inputs.
   for (auto arg : moduleOp.getBodyBlock()->getArguments()) {
     auto name = moduleOp.getArgName(arg.getArgNumber());
@@ -326,6 +363,7 @@ LogicalResult ModuleLowering::run() {
 
   // Clean up any dead ops. The lowering inserts a few defensive
   // `arc.state_read` ops that may remain unused. This cleans them up.
+  snapshotAnchor.erase();
   for (auto &op : llvm::make_early_inc_range(llvm::reverse(modelBlock)))
     if (mlir::isOpTriviallyDead(&op))
       op.erase();
@@ -481,6 +519,29 @@ SignalStorage &ModuleLowering::getSignalStorage(llhd::SignalOp op) {
   return storage;
 }
 
+/// Get the value of a state at the beginning of the evaluation. Signals and
+/// the results of coroutines are read through such snapshots, such that all
+/// readers observe the same values within one evaluation, regardless of
+/// whether they execute before or after the value is updated. Updates request
+/// another evaluation in the same time step, akin to a delta cycle, in which
+/// the readers observe the new values.
+Value ModuleLowering::getSnapshot(Value state) {
+  auto &snapshot = snapshots[state];
+  if (!snapshot)
+    snapshot = StateReadOp::create(snapshotBuilder, state.getLoc(), state);
+  return snapshot;
+}
+
+/// Record that a signal or coroutine result has changed in the current
+/// evaluation.
+void ModuleLowering::markActiveChange(OpBuilder &builder, Location loc) {
+  if (!activeChangeFlag)
+    return;
+  StateWriteOp::create(
+      builder, loc, activeChangeFlag,
+      hw::ConstantOp::create(builder, loc, builder.getI1Type(), 1));
+}
+
 /// Allocate the shadow storage for an LLHD signal that is driven with a delay.
 void ModuleLowering::allocateSignalShadow(llhd::SignalOp op) {
   auto &storage = getSignalStorage(op);
@@ -534,8 +595,19 @@ LogicalResult ModuleLowering::lowerPendingSignalUpdates() {
     builder.setInsertionPoint(ifDueOp.elseYield());
     signals::emitScheduleWakeup(builder, loc, arcContext, time);
 
-    // Otherwise apply the pending bits and clear the mask.
+    // Otherwise apply the pending bits and clear the mask, unless there were
+    // active changes in this evaluation. Pending updates of signals, such as
+    // nonblocking assignments, only take effect once no further active
+    // changes occur, as in the SystemVerilog scheduling semantics. The active
+    // changes have requested another evaluation in the same time step, which
+    // applies the update eventually.
     builder.setInsertionPoint(ifDueOp.thenYield());
+    auto activeChange = StateReadOp::create(builder, loc, activeChangeFlag);
+    auto noActiveChange = comb::XorOp::create(
+        builder, loc, activeChange,
+        hw::ConstantOp::create(builder, loc, builder.getI1Type(), 1));
+    auto ifApplyOp = scf::IfOp::create(builder, loc, noActiveChange, false);
+    builder.setInsertionPoint(ifApplyOp.thenYield());
     auto oldValue = StateReadOp::create(builder, loc, storage.value);
     auto nextValue = StateReadOp::create(builder, loc, storage.next);
     Value newValue = nextValue;
@@ -1075,6 +1147,12 @@ LogicalResult OpLowering::lowerStateful(
   for (auto [state, value] : llvm::zip(states, loweredResults))
     StateWriteOp::create(module.builder, value.getLoc(), state, value);
 
+  // Coroutines observe the values of states before they are updated. Request
+  // another evaluation in the same time step, such that they observe the
+  // updated values.
+  if (module.hasCoroutines)
+    module.requestDelta(module.builder, ifClockOp.getLoc());
+
   // Since we just wrote the new state value to storage, insert read ops just
   // before the if op that keep the old value around for any later ops that
   // still need it.
@@ -1202,7 +1280,21 @@ LogicalResult OpLowering::lower(MemoryOp op) {
 LogicalResult OpLowering::lower(TapOp op) {
   assert(phase == Phase::New);
 
-  auto value = lowerValue(op.getValue(), phase);
+  // Taps of signals observe the signal's current value, instead of its value
+  // at the beginning of the evaluation.
+  Value value;
+  if (auto probeOp = op.getValue().getDefiningOp<llhd::ProbeOp>()) {
+    llhd::SignalOp rootOp;
+    SmallVector<signals::Projection> projections;
+    if (failed(lowerRef(probeOp.getSignal(), phase, rootOp, projections)))
+      return failure();
+    if (initial)
+      return success();
+    value = signals::emitProbe(module.builder, op.getLoc(),
+                               module.getSignalStorage(rootOp), projections);
+  } else {
+    value = lowerValue(op.getValue(), phase);
+  }
   if (initial)
     return success();
   if (!value)
@@ -1275,15 +1367,19 @@ LogicalResult OpLowering::lower(InstanceOp op) {
 LogicalResult OpLowering::lower(CoroutineInstanceOp op) {
   assert(phase == Phase::New);
 
-  // A coroutine samples its arguments in the New phase, so that a re-entry sees
-  // the up-to-date values produced in the same evaluation and the change
-  // detector below compares against fresh values.
+  // A coroutine samples its arguments in the Old phase, before any states are
+  // updated in this evaluation. This matches the semantics of processes in
+  // SystemVerilog, which execute before the nonblocking assignments of
+  // registers triggered by the same clock edge take effect. State updates
+  // request another evaluation in the same time step, in which the coroutine
+  // observes the updated values.
   //
   // Signal references are passed as the states holding the signal's value and
   // shadow storage. For the purpose of change detection, the argument's value
   // is the current value of the signal.
   SmallVector<Value> inputs;
   SmallVector<Value> callArgs;
+  SmallVector<std::pair<Value, Value>> signalSnapshots;
   bool anyFailed = false;
   for (auto input : op.getArgs()) {
     if (isa<llhd::RefType>(input.getType())) {
@@ -1298,13 +1394,13 @@ LogicalResult OpLowering::lower(CoroutineInstanceOp op) {
         continue;
       module.allocateSignalShadow(sigOp);
       auto &storage = module.getSignalStorage(sigOp);
-      inputs.push_back(
-          StateReadOp::create(module.builder, op.getLoc(), storage.value));
+      inputs.push_back(module.getSnapshot(storage.value));
+      signalSnapshots.push_back({storage.value, inputs.back()});
       callArgs.append(
           {storage.value, storage.next, storage.mask, storage.time});
       continue;
     }
-    inputs.push_back(lowerValue(input, Phase::New));
+    inputs.push_back(lowerValue(input, Phase::Old));
     callArgs.push_back(inputs.back());
   }
   if (initial)
@@ -1448,12 +1544,36 @@ LogicalResult OpLowering::lower(CoroutineInstanceOp op) {
                                                   anyResultChanged, changed)
                              : changed;
     }
+
+    // Signals passed to the coroutine may have been changed by it. The
+    // coroutine requests a re-evaluation itself in that case. Changes of
+    // results and signals are active changes.
+    Value anySignalChanged;
+    for (auto [state, snapshot] : signalSnapshots) {
+      auto current = StateReadOp::create(module.builder, loc, state);
+      Value changed =
+          comb::ICmpOp::create(module.builder, loc, comb::ICmpPredicate::ne,
+                               signals::toBits(module.builder, loc, current),
+                               signals::toBits(module.builder, loc, snapshot));
+      anySignalChanged = anySignalChanged
+                             ? comb::OrOp::create(module.builder, loc,
+                                                  anySignalChanged, changed)
+                             : changed;
+    }
     if (anyResultChanged) {
       auto ifChangedOp =
           scf::IfOp::create(module.builder, loc, anyResultChanged, false);
       OpBuilder::InsertionGuard guard(module.builder);
       module.builder.setInsertionPoint(ifChangedOp.thenYield());
       module.requestDelta(module.builder, loc);
+      module.markActiveChange(module.builder, loc);
+    }
+    if (anySignalChanged) {
+      auto ifChangedOp =
+          scf::IfOp::create(module.builder, loc, anySignalChanged, false);
+      OpBuilder::InsertionGuard guard(module.builder);
+      module.builder.setInsertionPoint(ifChangedOp.thenYield());
+      module.markActiveChange(module.builder, loc);
     }
   }
 
@@ -1800,8 +1920,17 @@ LogicalResult OpLowering::lower(llhd::ProbeOp op) {
     return success();
   }
 
-  auto value = signals::emitProbe(module.getBuilder(phase), op.getLoc(),
-                                  module.getSignalStorage(rootOp), projections);
+  // Outside of the initial and final phase, read the signal's value at the
+  // beginning of the evaluation.
+  Value value;
+  auto &storage = module.getSignalStorage(rootOp);
+  if (phase == Phase::Initial || phase == Phase::Final)
+    value = StateReadOp::create(module.getBuilder(phase), op.getLoc(),
+                                storage.value);
+  else
+    value = module.getSnapshot(storage.value);
+  value = signals::project(module.getBuilder(phase), op.getLoc(), value,
+                           projections);
   module.loweredValues[{op.getResult(), phase}] = value;
   return success();
 }
@@ -1885,7 +2014,7 @@ LogicalResult OpLowering::lowerDrive(Operation *op, Value signal, Value value,
   }
   signals::emitDrive(builder, loc, module.arcContext,
                      module.getSignalStorage(rootOp), projections, loweredValue,
-                     delayInt);
+                     delayInt, module.activeChangeFlag);
   return success();
 }
 
@@ -1990,7 +2119,10 @@ Value OpLowering::lowerValue(CoroutineInstanceOp op, OpResult result,
   if (initial)
     return {};
   auto state = module.getAllocatedState(result);
-  return StateReadOp::create(module.getBuilder(phase), result.getLoc(), state);
+  if (phase == Phase::Initial || phase == Phase::Final)
+    return StateReadOp::create(module.getBuilder(phase), result.getLoc(),
+                               state);
+  return module.getSnapshot(state);
 }
 
 /// Handle uses of a state. This creates an `arc.state_read` op to read from the

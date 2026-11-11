@@ -256,7 +256,7 @@ void signals::emitScheduleWakeup(OpBuilder &builder, Location loc,
 void signals::emitDrive(OpBuilder &builder, Location loc, Value arcContext,
                         const SignalStorage &storage,
                         ArrayRef<Projection> projections, Value value,
-                        Value delay) {
+                        Value delay, Value changeFlag) {
   auto type = cast<StateType>(storage.value.getType()).getType();
 
   // Immediately update the signal value if the drive has no delay, and request
@@ -274,6 +274,10 @@ void signals::emitDrive(OpBuilder &builder, Location loc, Value arcContext,
     builder.setInsertionPoint(ifChangedOp.thenYield());
     auto now = CurrentTimeOp::create(builder, loc, arcContext);
     emitScheduleWakeup(builder, loc, arcContext, now);
+    if (changeFlag)
+      StateWriteOp::create(
+          builder, loc, changeFlag,
+          hw::ConstantOp::create(builder, loc, builder.getI1Type(), 1));
     return;
   }
 
