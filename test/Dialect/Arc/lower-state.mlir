@@ -912,17 +912,18 @@ arc.coroutine.define @DummyCoroutine(%arg: i42) -> (i42, i1, i64) {
 func.func private @ConsumeI8(i8)
 
 // Signals are allocated as states and initialized in the initial phase. Probes
-// read the state. Drives are deferred to the end of the model and request a
-// re-evaluation in the same time step if they change the signal's value.
-// Delayed drives update shadow storage which is applied once its time is due.
+// read the state. Drives are deferred to the end of the model, are executed
+// when their operands change, and request a re-evaluation in the same time
+// step if they change the signal's value. Delayed drives update shadow storage
+// which is applied once its time is due.
 // CHECK-LABEL: arc.model @Signals
 hw.module @Signals(in %en: i1, in %v: i4, in %idx: i3) {
   // CHECK: [[CTX:%.+]] = arc.as_context %arg0
   // CHECK: [[ACTIVE:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i1>
   // CHECK: [[S:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i8>
-  // CHECK: [[NEXT:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i8>
-  // CHECK: [[MASK:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i8>
-  // CHECK: [[TIME:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i64>
+  // CHECK: [[SEEN:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i1>
+  // CHECK: [[PREVV:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i8>
+  // CHECK: [[PREVEN:%.+]] = arc.alloc_state %arg0 : (!arc.storage) -> !arc.state<i1>
   // CHECK: arc.initial {
   // CHECK:   [[C42:%.+]] = hw.constant 42 : i8
   // CHECK:   arc.state_write [[S]] = [[C42]] : <i8>
@@ -935,8 +936,21 @@ hw.module @Signals(in %en: i1, in %v: i4, in %idx: i3) {
   %p = llhd.prb %s : i8
   func.call @ConsumeI8(%p) : (i8) -> ()
 
-  // Immediate drive with enable.
+  // Immediate drive with enable, executed on the first evaluation and whenever
+  // its value or enable change.
   // CHECK: [[EN:%.+]] = arc.state_read %in_en
+  // CHECK: [[WASSEEN:%.+]] = arc.state_read [[SEEN]] : <i1>
+  // CHECK: [[FIRST:%.+]] = comb.xor [[WASSEEN]], {{%.+}} : i1
+  // CHECK: arc.state_write [[SEEN]] = {{%.+}} : <i1>
+  // CHECK: [[OLDV:%.+]] = arc.state_read [[PREVV]] : <i8>
+  // CHECK: arc.state_write [[PREVV]] = [[P]] : <i8>
+  // CHECK: [[VCHANGED:%.+]] = comb.icmp ne [[P]], [[OLDV]] : i8
+  // CHECK: [[C1:%.+]] = comb.or [[FIRST]], [[VCHANGED]] : i1
+  // CHECK: [[OLDEN:%.+]] = arc.state_read [[PREVEN]] : <i1>
+  // CHECK: arc.state_write [[PREVEN]] = [[EN]] : <i1>
+  // CHECK: [[ENCHANGED:%.+]] = comb.icmp ne [[EN]], [[OLDEN]] : i1
+  // CHECK: [[C2:%.+]] = comb.or [[C1]], [[ENCHANGED]] : i1
+  // CHECK: scf.if [[C2]] {
   // CHECK: scf.if [[EN]] {
   // CHECK:   [[OLD:%.+]] = arc.state_read [[S]] : <i8>
   // CHECK:   arc.state_write [[S]] = [[P]] : <i8>
@@ -950,22 +964,24 @@ hw.module @Signals(in %en: i1, in %v: i4, in %idx: i3) {
   // CHECK:     arc.state_write [[ACTIVE]] = [[TRUE]] : <i1>
   // CHECK:   }
   // CHECK: }
+  // CHECK: }
   llhd.assign %s, %p if %en : i8
 
   // Delayed drive of a part of the signal.
   // CHECK: [[IDX:%.+]] = arc.state_read %in_idx
   // CHECK: [[V:%.+]] = arc.state_read %in_v
+  // CHECK: scf.if {{%.+}} {
   // CHECK: [[DELAY:%.+]] = hw.constant 0 : i64
-  // CHECK: [[OLDNEXT:%.+]] = arc.state_read [[NEXT]] : <i8>
+  // CHECK: [[OLDNEXT:%.+]] = arc.state_read [[NEXT:%[0-9]+]] : <i8>
   // CHECK: [[NEWNEXT:%.+]] = comb.or
   // CHECK: arc.state_write [[NEXT]] = [[NEWNEXT]] : <i8>
   // CHECK: [[PARTMASK:%.+]] = comb.or
-  // CHECK: [[OLDMASK:%.+]] = arc.state_read [[MASK]] : <i8>
+  // CHECK: [[OLDMASK:%.+]] = arc.state_read [[MASK:%[0-9]+]] : <i8>
   // CHECK: [[NEWMASK:%.+]] = comb.or [[OLDMASK]], [[PARTMASK]] : i8
   // CHECK: arc.state_write [[MASK]] = [[NEWMASK]] : <i8>
   // CHECK: [[NOW:%.+]] = arc.current_time [[CTX]]
   // CHECK: [[DUE:%.+]] = comb.add [[NOW]], [[DELAY]] : i64
-  // CHECK: arc.state_write [[TIME]] = [[DUE]] : <i64>
+  // CHECK: arc.state_write [[TIME:%[0-9]+]] = [[DUE]] : <i64>
   %part = llhd.sig.extract %s from %idx : <i8> -> <i4>
   %delta = llhd.constant_time <0ns, 1d>
   llhd.drv %part, %v after %delta : i4

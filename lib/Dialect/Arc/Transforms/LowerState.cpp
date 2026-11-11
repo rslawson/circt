@@ -1994,9 +1994,44 @@ LogicalResult OpLowering::lowerDrive(Operation *op, Value signal, Value value,
       !signals::hasBitRepresentation(loweredValue.getType()))
     return op->emitOpError() << "drives signal of unsupported type " << type;
 
-  // Only perform the drive if it is enabled.
+  // Drives in a module are executed whenever any of their operands change, as
+  // well as on the first evaluation. This matters if a signal has multiple
+  // drivers, such as a continuous assignment and a process, where the last
+  // driver to change determines the value of the signal.
   auto &builder = module.builder;
   OpBuilder::InsertionGuard guard(builder);
+  SmallVector<Value> operands{loweredValue};
+  if (loweredEnable)
+    operands.push_back(loweredEnable);
+  if (loweredDelay)
+    operands.push_back(llhd::TimeToIntOp::create(builder, loc, loweredDelay));
+  for (auto &proj : projections)
+    if (proj.index)
+      operands.push_back(proj.index);
+  auto i1Type = builder.getI1Type();
+  auto seenState = AllocStateOp::create(
+      module.allocBuilder, loc, StateType::get(i1Type), module.storageArg);
+  Value changed = comb::XorOp::create(
+      builder, loc, StateReadOp::create(builder, loc, seenState),
+      hw::ConstantOp::create(builder, loc, i1Type, 1));
+  StateWriteOp::create(builder, loc, seenState,
+                       hw::ConstantOp::create(builder, loc, i1Type, 1));
+  for (auto operand : operands) {
+    auto prevState = AllocStateOp::create(module.allocBuilder, loc,
+                                          StateType::get(operand.getType()),
+                                          module.storageArg);
+    auto prev = StateReadOp::create(builder, loc, prevState);
+    StateWriteOp::create(builder, loc, prevState, operand);
+    auto operandChanged =
+        comb::ICmpOp::create(builder, loc, comb::ICmpPredicate::ne,
+                             signals::toBits(builder, loc, operand),
+                             signals::toBits(builder, loc, prev));
+    changed = comb::OrOp::create(builder, loc, changed, operandChanged);
+  }
+  auto ifChangedOp = scf::IfOp::create(builder, loc, changed, false);
+  builder.setInsertionPoint(ifChangedOp.thenYield());
+
+  // Only perform the drive if it is enabled.
   if (loweredEnable) {
     auto ifOp = scf::IfOp::create(builder, loc, loweredEnable, false);
     builder.setInsertionPoint(ifOp.thenYield());
