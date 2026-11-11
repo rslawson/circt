@@ -55,3 +55,15 @@ hw.module @Signals() {
   // CHECK-NOT: arc.tap
   %0 = llhd.sig %c0_i8 : <i8>
 }
+
+// Ports passing references to signals observe a probe of the signal. Only
+// integer signals are tapped.
+// CHECK-LABEL: hw.module @RefPorts
+hw.module @RefPorts(in %r : !llhd.ref<i8>, in %m : !llhd.ref<!hw.array<4xi8>>, out o : !llhd.ref<i8>) {
+  // CHECK-NEXT: [[P:%.+]] = llhd.prb %r : i8
+  // CHECK-NEXT: arc.tap [[P]] {names = ["r"]} : i8
+  // CHECK-NOT: arc.tap
+  // CHECK: [[Q:%.+]] = llhd.prb %r : i8
+  // CHECK-NEXT: arc.tap [[Q]] {names = ["o"]} : i8
+  hw.output %r : !llhd.ref<i8>
+}

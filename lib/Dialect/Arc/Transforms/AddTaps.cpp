@@ -108,6 +108,14 @@ struct AddTapsPass : public arc::impl::AddTapsBase<AddTapsPass> {
       return;
     if (isa<seq::ClockType>(value.getType()))
       value = builder.createOrFold<seq::FromClockOp>(loc, value);
+    // Ports passing references to signals, such as for hierarchical references,
+    // observe a probe of the signal. Only integers are traced, so don't read
+    // other signals, which may be large memories.
+    if (auto refType = dyn_cast<llhd::RefType>(value.getType())) {
+      if (!isa<IntegerType>(refType.getNestedType()))
+        return;
+      value = llhd::ProbeOp::create(builder, loc, value);
+    }
     arc::TapOp::create(builder, loc, value, name);
   }
 };
