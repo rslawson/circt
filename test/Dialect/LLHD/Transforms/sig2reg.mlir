@@ -195,3 +195,50 @@ hw.module @PromoteRegisterObservingSignal(in %clk : !seq.clock, in %a : i42, in 
   llhd.assign %x, %r : i42
   hw.output %p : i42
 }
+
+// Probes in different resume blocks of a process observe the signal at
+// different times. Replacing them with the same value would allow CSE to merge
+// the identical additions.
+// CHECK-LABEL: hw.module @SkipObservedAtMultipleTimes
+func.func private @use_i42(%arg0: i42)
+hw.module @SkipObservedAtMultipleTimes(in %a : i42) {
+  // CHECK: [[SIG:%.+]] = llhd.sig
+  // CHECK: llhd.prb [[SIG]]
+  // CHECK: llhd.prb [[SIG]]
+  %c0 = hw.constant 0 : i42
+  %c1 = hw.constant 1 : i42
+  %x = llhd.sig %c0 : <i42>
+  llhd.assign %x, %a : i42
+  llhd.process {
+    %0 = llhd.prb %x : i42
+    %1 = comb.add %0, %c1 : i42
+    func.call @use_i42(%1) : (i42) -> ()
+    llhd.wait ^bb1
+  ^bb1:
+    %2 = llhd.prb %x : i42
+    %3 = comb.add %2, %c1 : i42
+    func.call @use_i42(%3) : (i42) -> ()
+    llhd.halt
+  }
+  hw.output
+}
+
+// A single observation per process is fine.
+// CHECK-LABEL: hw.module @PromoteObservedAtSingleTime
+hw.module @PromoteObservedAtSingleTime(in %a : i42) {
+  // CHECK-NOT: llhd.sig
+  // CHECK: comb.add %a
+  %c0 = hw.constant 0 : i42
+  %c1 = hw.constant 1 : i42
+  %x = llhd.sig %c0 : <i42>
+  llhd.assign %x, %a : i42
+  llhd.process {
+    llhd.wait ^bb1
+  ^bb1:
+    %0 = llhd.prb %x : i42
+    %1 = comb.add %0, %c1 : i42
+    func.call @use_i42(%1) : (i42) -> ()
+    llhd.wait ^bb1
+  }
+  hw.output
+}

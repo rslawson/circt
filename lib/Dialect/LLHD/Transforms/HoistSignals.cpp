@@ -6,6 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "ObservationUtils.h"
 #include "ProjectionUtils.h"
 #include "circt/Dialect/LLHD/LLHDOps.h"
 #include "circt/Dialect/LLHD/LLHDPasses.h"
@@ -119,6 +120,12 @@ void ProbeHoister::findValuesLiveAcrossWait(Liveness &liveness) {
 /// all predecessors are `llhd.wait` ops, and the entry block. Only waits
 /// without any side-effecting op in between themselves and the beginning of the
 /// block can be hoisted.
+///
+/// A value defined outside the process is observed at the time of its use.
+/// Probes of a signal are therefore only hoisted if side-effect free ops in the
+/// process would not observe the hoisted value at different points in time.
+/// Otherwise identical computations on the hoisted value could be merged by
+/// CSE. See `ObservationUtils.h`.
 void ProbeHoister::hoistProbes() {
   auto findExistingProbe = [&](Value signal) {
     for (auto *user : signal.getUsers())
@@ -128,6 +135,8 @@ void ProbeHoister::hoistProbes() {
     return ProbeOp{};
   };
 
+  // Collect the probes that can be hoisted.
+  SmallVector<ProbeOp> candidates;
   for (auto &block : region) {
     // We can only hoist probes in blocks where all predecessors have wait
     // terminators.
@@ -136,7 +145,7 @@ void ProbeHoister::hoistProbes() {
         }))
       continue;
 
-    for (auto &op : llvm::make_early_inc_range(block)) {
+    for (auto &op : block) {
       auto probeOp = dyn_cast<ProbeOp>(op);
 
       // We can only hoist probes that have no side-effecting ops between
@@ -163,27 +172,54 @@ void ProbeHoister::hoistProbes() {
                    << "- Skipping (local signal) " << probeOp << "\n");
         continue;
       }
+      candidates.push_back(probeOp);
+    }
+  }
 
-      // Move the probe out of the process, trying to reuse any previous probe
-      // that we've already hoisted.
-      auto &hoistedOp = hoistedProbes[probeOp.getSignal()];
-      if (hoistedOp) {
-        LLVM_DEBUG(llvm::dbgs() << "- Replacing " << probeOp << "\n");
-        probeOp.replaceAllUsesWith(hoistedOp.getResult());
+  // Determine whether side-effect free ops would observe the hoisted value of
+  // each signal at multiple points in time. The hoisted value is used by the
+  // users of the hoisted probes, and of any probes of the signal outside the
+  // process.
+  SmallMapVector<Value, ObservationTracker, 4> trackers;
+  for (auto probeOp : candidates) {
+    auto [it, inserted] = trackers.try_emplace(probeOp.getSignal());
+    if (inserted)
+      for (auto *user : probeOp.getSignal().getUsers())
+        if (auto outsideProbe = dyn_cast<ProbeOp>(user))
+          if (outsideProbe->getParentRegion()->isProperAncestor(&region))
+            it->second.addUsers(outsideProbe);
+    it->second.addUsers(probeOp);
+  }
+  DenseSet<Value> observedAtMultipleTimes;
+  for (auto &[signal, tracker] : trackers)
+    if (tracker.observedAtMultipleTimes())
+      observedAtMultipleTimes.insert(signal);
+
+  // Move the probes out of the process, trying to reuse any previous probe
+  // that we've already hoisted.
+  for (auto probeOp : candidates) {
+    if (observedAtMultipleTimes.contains(probeOp.getSignal())) {
+      LLVM_DEBUG(llvm::dbgs() << "- Skipping (observed at multiple times) "
+                              << probeOp << "\n");
+      continue;
+    }
+    auto &hoistedOp = hoistedProbes[probeOp.getSignal()];
+    if (hoistedOp) {
+      LLVM_DEBUG(llvm::dbgs() << "- Replacing " << probeOp << "\n");
+      probeOp.replaceAllUsesWith(hoistedOp.getResult());
+      probeOp.erase();
+    } else {
+      LLVM_DEBUG(llvm::dbgs() << "- Hoisting " << probeOp << "\n");
+      if (auto existingOp = findExistingProbe(probeOp.getSignal())) {
+        probeOp.replaceAllUsesWith(existingOp.getResult());
         probeOp.erase();
+        hoistedOp = existingOp;
       } else {
-        LLVM_DEBUG(llvm::dbgs() << "- Hoisting " << probeOp << "\n");
-        if (auto existingOp = findExistingProbe(probeOp.getSignal())) {
-          probeOp.replaceAllUsesWith(existingOp.getResult());
-          probeOp.erase();
-          hoistedOp = existingOp;
-        } else {
-          if (auto *defOp = probeOp.getSignal().getDefiningOp())
-            probeOp->moveAfter(defOp);
-          else
-            probeOp->moveBefore(region.getParentOp());
-          hoistedOp = probeOp;
-        }
+        if (auto *defOp = probeOp.getSignal().getDefiningOp())
+          probeOp->moveAfter(defOp);
+        else
+          probeOp->moveBefore(region.getParentOp());
+        hoistedOp = probeOp;
       }
     }
   }

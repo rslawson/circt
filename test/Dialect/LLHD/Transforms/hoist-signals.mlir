@@ -488,3 +488,56 @@ hw.module @HoistSingleDynamicProjection(in %i : i1, in %x : i5) {
 func.func private @use_i42(%arg0: i42)
 func.func private @use_inout_i42(%arg0: !llhd.ref<i42>)
 func.func private @maybe_side_effecting()
+
+// Probes in different resume blocks observe the signal at different times. If
+// they were replaced by the same hoisted value, CSE could merge the identical
+// additions and observe the signal at the wrong time.
+// CHECK-LABEL: @DontHoistProbesObservedAtMultipleTimes
+hw.module @DontHoistProbesObservedAtMultipleTimes() {
+  %c0_i42 = hw.constant 0 : i42
+  %c1_i42 = hw.constant 1 : i42
+  %a = llhd.sig %c0_i42 : <i42>
+  // CHECK-NOT: llhd.prb
+  // CHECK: llhd.process
+  llhd.process {
+    // CHECK: llhd.prb %a
+    %0 = llhd.prb %a : i42
+    %1 = comb.add %0, %c1_i42 : i42
+    func.call @use_i42(%1) : (i42) -> ()
+    llhd.wait ^bb1
+  ^bb1:
+    // CHECK: llhd.prb %a
+    %2 = llhd.prb %a : i42
+    %3 = comb.add %2, %c1_i42 : i42
+    func.call @use_i42(%3) : (i42) -> ()
+    llhd.halt
+  }
+}
+
+// Blocks reached from the same resume block without suspending observe the
+// signal at the same time.
+// CHECK-LABEL: @HoistProbesObservedAtSameTime
+hw.module @HoistProbesObservedAtSameTime(in %b: i1) {
+  %c0_i42 = hw.constant 0 : i42
+  %c1_i42 = hw.constant 1 : i42
+  %a = llhd.sig %c0_i42 : <i42>
+  // CHECK: [[A:%.+]] = llhd.prb %a
+  // CHECK: llhd.process
+  llhd.process {
+    llhd.wait ^bb1
+  ^bb1:
+    // CHECK-NOT: llhd.prb
+    // CHECK: comb.add [[A]]
+    %0 = llhd.prb %a : i42
+    %1 = comb.add %0, %c1_i42 : i42
+    func.call @use_i42(%1) : (i42) -> ()
+    cf.cond_br %b, ^bb2, ^bb3
+  ^bb2:
+    // CHECK: comb.sub [[A]]
+    %2 = comb.sub %0, %c1_i42 : i42
+    func.call @use_i42(%2) : (i42) -> ()
+    cf.br ^bb3
+  ^bb3:
+    llhd.wait ^bb1
+  }
+}
