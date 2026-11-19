@@ -67,6 +67,10 @@ private:
   InstanceGraph *instanceGraph;
   DenseSet<Block *> executableBlocks;
 
+  /// Modules with side effects that are observable outside of the module, such
+  /// as printing a message. Instances of these modules must be kept.
+  DenseSet<Operation *> modulesWithObservableEffects;
+
   void markBlockExecutable(Block *block);
 
   void visitInstanceLike(HWInstanceLike instanceLike);
@@ -78,6 +82,7 @@ private:
 
   void markUnknownSideEffectOp(Operation *op);
   void markInstanceLike(HWInstanceLike instanceLike);
+  void markObservableEffects(HWModuleLike module);
 
   void markBlockUndeletable(Operation *op) {
 
@@ -98,6 +103,64 @@ static bool hasUnknownSideEffect(Operation *op) {
   }
 
   return false;
+}
+
+/// Return the storage accessed through \p ref, such as a signal or wire, or a
+/// port of a module passing a reference to storage. Projections of the
+/// storage, such as array elements, are traced back to the storage itself.
+static Value getAccessedStorage(Value ref) {
+  while (auto *defOp = ref.getDefiningOp()) {
+    auto it = llvm::find_if(defOp->getOperands(), [&](Value operand) {
+      return operand.getType().getTypeID() == ref.getType().getTypeID();
+    });
+    if (it == defOp->operand_end())
+      break;
+    ref = *it;
+  }
+  return ref;
+}
+
+/// Check whether \p op has side effects that may be observed outside of the
+/// module containing it, such as printing a message or terminating the
+/// simulation. Operations that describe their memory effects, such as
+/// registers, memories, and drives of signals, only have observable effects if
+/// they write to storage passed in through a port. Writes to storage declared
+/// within the module, as well as any other state, only matter through the
+/// values the module produces. Operations without known effects are assumed to
+/// be observable, unless they only declare or assign storage within the module,
+/// such as wires.
+static bool hasObservableSideEffect(Operation *op) {
+  // The operations nested within the op are checked individually.
+  if (op->hasTrait<OpTrait::HasRecursiveMemoryEffects>())
+    return false;
+
+  auto isPortStorage = [](Value ref) {
+    return isa<BlockArgument>(getAccessedStorage(ref));
+  };
+
+  if (auto effectOp = dyn_cast<mlir::MemoryEffectOpInterface>(op)) {
+    SmallVector<mlir::MemoryEffects::EffectInstance> effects;
+    effectOp.getEffects(effects);
+    return llvm::any_of(effects, [&](auto &effect) {
+      return isa<mlir::MemoryEffects::Write>(effect.getEffect()) &&
+             effect.getValue() && isPortStorage(effect.getValue());
+    });
+  }
+
+  // Declarations of storage, such as wires.
+  if (llvm::any_of(op->getResultTypes(),
+                   [](Type type) { return isa<InOutType>(type); }))
+    return false;
+
+  // Assignments to storage, which are only observable for ports.
+  SmallVector<Value> storageRefs;
+  for (auto operand : op->getOperands())
+    if (isa<InOutType>(operand.getType()))
+      storageRefs.push_back(operand);
+  if (!storageRefs.empty())
+    return llvm::any_of(storageRefs, isPortStorage);
+
+  return true;
 }
 
 /// Clone \p instance, but with ports deleted according to
@@ -178,6 +241,29 @@ void HWIMDeadCodeElim::markUnknownSideEffectOp(Operation *op) {
   for (auto operand : op->getOperands())
     markAlive(operand);
   markBlockUndeletable(op);
+  if (hasObservableSideEffect(op))
+    if (auto module = op->getParentOfType<HWModuleLike>())
+      markObservableEffects(module);
+}
+
+/// Mark a module as having observable side effects. All instances of the
+/// module are kept, and the modules containing them in turn have observable
+/// side effects.
+void HWIMDeadCodeElim::markObservableEffects(HWModuleLike module) {
+  if (!modulesWithObservableEffects.insert(module).second)
+    return;
+  auto *node = instanceGraph->lookup(module);
+  if (!node)
+    return;
+  for (auto *use : node->uses()) {
+    auto instance =
+        dyn_cast_or_null<HWInstanceLike>(use->getInstance().getOperation());
+    if (!instance)
+      continue;
+    markAlive(instance);
+    if (auto parent = instance->getParentOfType<HWModuleLike>())
+      markObservableEffects(parent);
+  }
 }
 
 void HWIMDeadCodeElim::markInstanceLike(HWInstanceLike instanceLike) {

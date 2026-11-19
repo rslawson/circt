@@ -863,17 +863,87 @@ module {
     hw.output
   }
 
-  // FIXME: The instance is removed since none of its results are used, although
-  // the instantiated module has side effects. It should be kept.
   // LIVENESS-LABEL: hw.module public @NestedBlocksTop
   // LIVENESS-SAME: "op-liveness" = "LIVE"
   // ELIMINATE-LABEL: hw.module public @NestedBlocksTop
-  // ELIMINATE-NOT:     hw.instance
-  // ELIMINATE:         hw.output
+  // ELIMINATE-NEXT:    hw.instance "nested" @NestedBlocks
   hw.module public @NestedBlocksTop() {
     hw.instance "nested" @NestedBlocks() -> ()
     hw.output
   }
 
   func.func private @unknownFunc()
+}
+
+// -----
+
+// Instances of modules with side effects that are observable outside of the
+// module, such as printing a message, are kept even if none of their results
+// are used. This applies transitively through the instance hierarchy. Side
+// effects that only affect the module's own state, such as registers and
+// drives of local signals and wires, do not keep an instance alive. Drives of
+// signals and wires passed in through ports do.
+module {
+  // ELIMINATE-LABEL: hw.module private @PrintLeaf
+  // ELIMINATE:         sim.proc.print
+  hw.module private @PrintLeaf(in %a : i1, out b : i1) {
+    llhd.process {
+      %0 = sim.fmt.literal "hello"
+      sim.proc.print %0
+      llhd.halt
+    }
+    hw.output %a : i1
+  }
+
+  // ELIMINATE-LABEL: hw.module private @PrintMid
+  // ELIMINATE-NEXT:    hw.instance "leaf" @PrintLeaf()
+  hw.module private @PrintMid(in %a : i1, out b : i1) {
+    %0 = hw.instance "leaf" @PrintLeaf(a: %a: i1) -> (b: i1)
+    hw.output %0 : i1
+  }
+
+  // ELIMINATE-LABEL: hw.module private @LocalState
+  hw.module private @LocalState(in %a : i1, in %clock : !seq.clock, out b : i1) {
+    %t = llhd.constant_time <0ns, 1d>
+    %sig = llhd.sig %a : <i1>
+    llhd.drv %sig, %a after %t : i1
+    %w = sv.wire : !hw.inout<i1>
+    sv.assign %w, %a : i1
+    %r = seq.firreg %a clock %clock : i1
+    hw.output %r : i1
+  }
+
+  // ELIMINATE-LABEL: hw.module private @DriveRefPort
+  // ELIMINATE:         llhd.drv
+  hw.module private @DriveRefPort(in %a : i1, in %s : !llhd.ref<i2>) {
+    %t = llhd.constant_time <0ns, 1d>
+    %c0_i1 = hw.constant 0 : i1
+    %0 = llhd.sig.extract %s from %c0_i1 : <i2> -> <i1>
+    llhd.drv %0, %a after %t : i1
+  }
+
+  // ELIMINATE-LABEL: hw.module private @AssignInOutPort
+  // ELIMINATE:         sv.assign
+  hw.module private @AssignInOutPort(in %a : i1, in %w : !hw.inout<i1>) {
+    sv.assign %w, %a : i1
+  }
+
+  // ELIMINATE-LABEL: hw.module public @ObservableTop
+  // ELIMINATE:         %s = llhd.sig
+  // ELIMINATE-NEXT:    %w = sv.wire
+  // ELIMINATE-NEXT:    hw.instance "mid" @PrintMid()
+  // ELIMINATE-NOT:     hw.instance "state"
+  // ELIMINATE-NEXT:    hw.instance "drive" @DriveRefPort(a: %a: i1, s: %s: !llhd.ref<i2>)
+  // ELIMINATE-NEXT:    hw.instance "assign" @AssignInOutPort(a: %a: i1, w: %w: !hw.inout<i1>)
+  // ELIMINATE-NEXT:    hw.output
+  hw.module public @ObservableTop(in %a : i1, in %clock : !seq.clock) {
+    %c0_i2 = hw.constant 0 : i2
+    %s = llhd.sig %c0_i2 : <i2>
+    %w = sv.wire : !hw.inout<i1>
+    %0 = hw.instance "mid" @PrintMid(a: %a: i1) -> (b: i1)
+    %1 = hw.instance "state" @LocalState(a: %a: i1, clock: %clock: !seq.clock) -> (b: i1)
+    hw.instance "drive" @DriveRefPort(a: %a: i1, s: %s: !llhd.ref<i2>) -> ()
+    hw.instance "assign" @AssignInOutPort(a: %a: i1, w: %w: !hw.inout<i1>) -> ()
+    hw.output
+  }
 }
