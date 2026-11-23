@@ -555,6 +555,30 @@ static LogicalResult convert(llhd::CombinationalOp op,
   return success();
 }
 
+/// `llhd.delay` -> `llhd.sig` + `llhd.drv` + `llhd.prb`
+///
+/// The delayed value is held in a signal, which is driven with the input after
+/// the delay. LowerState lowers the signal to state that is updated once the
+/// delay has elapsed. Until then, the signal holds zero.
+static LogicalResult convert(llhd::DelayOp op, llhd::DelayOp::Adaptor adaptor,
+                             ConversionPatternRewriter &rewriter) {
+  auto loc = op.getLoc();
+  auto type = op.getType();
+  auto width = hw::getBitWidth(type);
+  if (width < 0)
+    return rewriter.notifyMatchFailure(op, "type has unknown bit width");
+  Value init = hw::ConstantOp::create(rewriter, loc, APInt::getZero(width));
+  if (init.getType() != type)
+    init = hw::BitcastOp::create(rewriter, loc, type, init);
+  auto signal = llhd::SignalOp::create(rewriter, loc, llhd::RefType::get(type),
+                                       StringAttr{}, init);
+  auto delay = llhd::ConstantTimeOp::create(rewriter, loc, op.getDelay());
+  llhd::DriveOp::create(rewriter, loc, signal, adaptor.getInput(), delay,
+                        Value{});
+  rewriter.replaceOpWithNewOp<llhd::ProbeOp>(op, signal);
+  return success();
+}
+
 /// `llhd.yield` -> `arc.output`
 static LogicalResult convert(llhd::YieldOp op, llhd::YieldOp::Adaptor adaptor,
                              ConversionPatternRewriter &rewriter) {
@@ -588,12 +612,16 @@ void ConvertToArcsPass::runOnOperation() {
   ConversionPatternSet patterns(&getContext(), converter);
   patterns.add<llhd::CombinationalOp>(convert);
   patterns.add<llhd::YieldOp>(convert);
+  patterns.add<llhd::DelayOp>(convert);
 
-  // `llhd.combinational` and `llhd.yield` are the only LLHD ops rewritten by
-  // this pass; all other ops are left untouched for subsequent lowering
-  // passes to handle.
+  // `llhd.combinational`, `llhd.yield`, and `llhd.delay` are the only LLHD ops
+  // rewritten by this pass; all other ops are left untouched for subsequent
+  // lowering passes to handle. Delays are only rewritten at the module level,
+  // where LowerState supports the signals they are rewritten to.
   ConversionTarget target(getContext());
   target.addIllegalOp<llhd::CombinationalOp, llhd::YieldOp>();
+  target.addDynamicallyLegalOp<llhd::DelayOp>(
+      [](llhd::DelayOp op) { return !isa<hw::HWModuleOp>(op->getParentOp()); });
   target.markUnknownOpDynamicallyLegal([](Operation *) { return true; });
 
   // Disable pattern rollback to use the faster one-shot dialect conversion.

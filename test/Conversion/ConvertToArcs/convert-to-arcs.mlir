@@ -374,3 +374,32 @@ hw.module @SignalProjections(in %v: i8, in %en: i1) {
   %0 = llhd.sig.extract %s from %c0_i5 : <i32> -> <i8>
   llhd.assign %0, %v if %en : i8
 }
+
+// Delays in modules are converted into signals, which are driven with the input
+// after the delay. Delays nested in other operations are not converted.
+// CHECK-LABEL: arc.define @Delay_arc
+//       CHECK:   hw.bitcast {{%.+}} : (i3) -> !hw.struct<x: i1, y: i2>
+// CHECK-LABEL: hw.module @Delay
+hw.module @Delay(in %a : i42, in %b : !hw.struct<x: i1, y: i2>, out x : i42, out y : !hw.struct<x: i1, y: i2>, out z : i42) {
+  // CHECK-DAG: [[ZERO:%.+]] = hw.constant 0 : i42
+  // CHECK-DAG: [[SIG:%.+]] = llhd.sig [[ZERO]] : <i42>
+  // CHECK-DAG: [[TIME:%.+]] = llhd.constant_time <1ns, 2d>
+  // CHECK-DAG: llhd.drv [[SIG]], %a after [[TIME]] : i42
+  // CHECK-DAG: [[PRB:%.+]] = llhd.prb [[SIG]] : i42
+  %0 = llhd.delay %a by <1ns, 2d> : i42
+  // CHECK-DAG: [[ZERO3:%.+]] = hw.constant 0 : i3
+  // CHECK-DAG: [[INIT:%.+]] = arc.call @Delay_arc([[ZERO3]])
+  // CHECK-DAG: [[SIG2:%.+]] = llhd.sig [[INIT]] : <!hw.struct<x: i1, y: i2>>
+  // CHECK-DAG: [[TIME2:%.+]] = llhd.constant_time <0ns, 1d>
+  // CHECK-DAG: llhd.drv [[SIG2]], %b after [[TIME2]] : !hw.struct<x: i1, y: i2>
+  // CHECK-DAG: [[PRB2:%.+]] = llhd.prb [[SIG2]] : !hw.struct<x: i1, y: i2>
+  %1 = llhd.delay %b by <0ns, 1d> : !hw.struct<x: i1, y: i2>
+  // CHECK-DAG: [[PROC:%.+]] = llhd.process
+  // CHECK-DAG:   llhd.delay %a by <0ns, 1d> : i42
+  %2 = llhd.process -> i42 {
+    %3 = llhd.delay %a by <0ns, 1d> : i42
+    llhd.halt %3 : i42
+  }
+  // CHECK: hw.output [[PRB]], [[PRB2]], [[PROC]]
+  hw.output %0, %1, %2 : i42, !hw.struct<x: i1, y: i2>, i42
+}
